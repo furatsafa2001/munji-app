@@ -1,0 +1,16 @@
+rules_version = '2';
+
+// MUNJI — Cloud Storage rules
+//
+// No direct client access to ECG data, in either direction.
+// Uploads and downloads both go through signed URLs issued by a function
+// after an ownership check. This is the week 4 deliverable; the baseline
+// here is deny-all so nothing leaks before that work lands.
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

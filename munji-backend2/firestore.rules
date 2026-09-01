@@ -1,0 +1,228 @@
+rules_version = '2';
+
+// MUNJI — Firestore security rules (week 1 baseline)
+//
+// Principle: the client may READ what it owns or is linked to.
+// Anything that carries clinical or safety meaning is written by the
+// backend only, never by a client.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------------------------------------------------------- helpers
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function uid() {
+      return request.auth.uid;
+    }
+
+    function userData(u) {
+      return get(/databases/$(database)/documents/users/$(u)).data;
+    }
+
+    // caregiverIds is denormalised onto the patient document so rules can
+    // check the relationship without a query. Written by functions only.
+    function caregiversOf(patientId) {
+      return userData(patientId).get('patient', {}).get('caregiverIds', []);
+    }
+
+    function isPatient(patientId) {
+      return signedIn() && uid() == patientId;
+    }
+
+    // Revocation works by removing the uid from caregiverIds, so a revoked
+    // caregiver fails this check immediately — no rule needs to read the
+    // careLink's status. The link document is kept for history, not access.
+    function isLinkedCaregiver(patientId) {
+      return signedIn() && uid() in caregiversOf(patientId);
+    }
+
+    function canRead(patientId) {
+      return isPatient(patientId) || isLinkedCaregiver(patientId);
+    }
+
+    // Being linked IS the permission. A caregiver the patient has linked
+    // sees their data and manages their alarms — there are no per-feature
+    // toggles on top of the link.
+    function canManageAlarms(patientId) {
+      return canRead(patientId);
+    }
+
+    function unchanged(field) {
+      return !(field in request.resource.data) ||
+             request.resource.data[field] == resource.data[field];
+    }
+
+    // ------------------------------------------------------------ users
+
+    match /users/{userId} {
+
+      function userShapeValid() {
+        let d = request.resource.data;
+        return d.role in ['patient', 'caregiver']
+               && d.fullName is string && d.fullName.size() > 0
+               && d.phone is string && d.phone.matches('^\\+[0-9]{8,15}$')
+               && d.email is string
+               && d.locale in ['ar', 'en']
+               && d.fcmTokens is list
+               && d.createdAt is timestamp;
+      }
+
+      // the care relationship must be identical before and after — only
+      // linkCode_redeem and link_revoke may change it
+      function linksUntouched() {
+        return request.resource.data.get('patient', {}).get('caregiverIds', [])
+                 == resource.data.get('patient', {}).get('caregiverIds', [])
+               && request.resource.data.get('caregiver', {}).get('patientIds', [])
+                 == resource.data.get('caregiver', {}).get('patientIds', []);
+      }
+
+      allow read: if isPatient(userId) || isLinkedCaregiver(userId);
+
+      // a user creates only their own profile, and cannot grant themselves
+      // a relationship — links are established server-side
+      allow create: if signedIn()
+                    && uid() == userId
+                    && userShapeValid()
+                    && request.resource.data.get('patient', {}).get('caregiverIds', []).size() == 0
+                    && request.resource.data.get('caregiver', {}).get('patientIds', []).size() == 0;
+
+      allow update: if signedIn()
+                    && uid() == userId
+                    && userShapeValid()
+                    && unchanged('role')
+                    && unchanged('createdAt')
+                    && linksUntouched();
+
+      allow delete: if false;
+    }
+
+    // ---------------------------------------------------------- devices
+
+    match /devices/{deviceId} {
+
+      function deviceShapeValid() {
+        let d = request.resource.data;
+        return d.patientId is string
+               && d.serial is string && d.serial.size() > 0
+               && d.model is string
+               && d.status in ['paired', 'unpaired']
+               && d.pairedAt is timestamp
+               && (!('battery' in d) || (d.battery is number && d.battery >= 0 && d.battery <= 100))
+               && (!('signalQuality' in d) || d.signalQuality in ['good', 'weak', 'leadoff']);
+      }
+
+      allow read: if canRead(resource.data.patientId);
+
+      // One device per patient. The document ID is the patient's uid, so a
+      // second pairing overwrites the first instead of creating a rival
+      // stream — the database itself makes two active devices impossible.
+      allow create: if isPatient(request.resource.data.patientId)
+                    && deviceId == uid()
+                    && deviceShapeValid();
+
+      allow update: if isPatient(resource.data.patientId)
+                    && deviceShapeValid()
+                    && unchanged('patientId')
+                    && unchanged('serial');
+
+      allow delete: if false;
+    }
+
+    // -------------------------------------------------------- careLinks
+
+    match /careLinks/{linkId} {
+      allow read: if signedIn()
+                  && (uid() == resource.data.patientId || uid() == resource.data.caregiverId);
+      allow write: if false;                 // linkCode_redeem / link_revoke only
+    }
+
+    // -------------------------------------------------------- linkCodes
+
+    match /linkCodes/{code} {
+      allow read, write: if false;           // six digits — never client-readable
+    }
+
+    // ----------------------------------------------------------- events
+
+    match /events/{eventId} {
+      allow read: if canRead(resource.data.patientId);
+
+      // a client that can write events can fabricate a cardiac emergency,
+      // or suppress a real one. Classification originates server-side.
+      allow write: if false;
+    }
+
+    // ------------------------------------------------------- recordings
+
+    match /recordings/{recordingId} {
+      allow read: if canRead(resource.data.patientId);
+      allow write: if false;                 // written on storage finalize
+    }
+
+    // ----------------------------------------------------------- alerts
+
+    match /alerts/{alertId} {
+      allow read, write: if false;           // dispatcher only
+    }
+
+    // -------------------------------------------------------- medAlarms
+
+    // Document ID is {patientUid}_{normalisedMedName} — see medKey() in
+    // src/alarms.js. Two people adding the same medicine collide on the
+    // same ID instead of creating two reminders for one dose, which is how
+    // a patient ends up taking a double dose.
+    match /medAlarms/{alarmId} {
+
+      function medShapeValid() {
+        let d = request.resource.data;
+        return d.patientId is string
+               && d.medName is string && d.medName.size() > 0
+               && d.medKey is string && d.medKey.size() > 0
+               && alarmId == d.patientId + '_' + d.medKey
+               && d.timeLocal is string && d.timeLocal.matches('^[0-2][0-9]:[0-5][0-9]$')
+               && d.repeatDays is list
+               && d.enabled is bool;
+      }
+
+      allow read: if canRead(resource.data.patientId);
+
+      // create fails if the ID already exists, so a second person adding
+      // the same medicine is told it is already there rather than silently
+      // duplicating it
+      allow create: if canManageAlarms(request.resource.data.patientId)
+                    && medShapeValid()
+                    && request.resource.data.createdBy == uid();
+
+      allow update: if canManageAlarms(resource.data.patientId)
+                    && medShapeValid()
+                    && unchanged('patientId')
+                    && unchanged('medKey')
+                    && unchanged('createdBy');
+
+      allow delete: if canManageAlarms(resource.data.patientId);
+    }
+
+    // ------------------------------------------------------ vitalsDaily
+
+    match /vitalsDaily/{docId} {
+      allow read: if canRead(resource.data.patientId);
+      allow write: if false;                 // scheduled rollup only
+    }
+
+    // --------------------------------------------------------- auditLog
+
+    match /auditLog/{logId} {
+      allow read, write: if false;           // append-only, Admin SDK only
+    }
+
+    // ------------------------------------------------- deny by default
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,35 @@
+.DS_Store
+._*
+__MACOSX/
+* [0-9].*
+* [0-9]
+.idea/
+*.iml
+.vscode/
+munji_app/.dart_tool/
+munji_app/.pub-cache/
+munji_app/build/
+munji_app/coverage/
+munji_app/.flutter-plugins
+munji_app/.flutter-plugins-dependencies
+munji_app/android/local.properties
+munji_app/android/.gradle/
+munji_app/android/.kotlin/
+*.jks
+*.keystore
+key.properties
+munji_app/ios/.symlinks/
+munji_app/ios/Pods/
+munji_app/ios/Flutter/Generated.xcconfig
+munji_app/ios/Flutter/ephemeral/
+munji_app/ios/Flutter/flutter_export_environment.sh
+**/xcuserdata/
+*.xcuserstate
+node_modules/
+*-debug.log
+firebase-debug.log*
+firestore-debug.log*
+.firebase/
+.env
+.env.*
+*serviceAccount*.json

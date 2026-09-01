@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1071016549864",
+    "project_id": "munji-dev",
+    "storage_bucket": "munji-dev.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1071016549864:android:0e2f1c346839f86aab585d",
+        "android_client_info": {
+          "package_name": "co.munji.munji_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAszoFAQzN8JMsG0cYABpE9hNieyt63jnQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
