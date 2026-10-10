@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import 'device_config.dart';
 import 'device_service.dart';
@@ -24,11 +25,48 @@ class EcgPacket {
   final DateTime receivedAt;
 }
 
-/// Which electrodes have lost skin contact.
+/// Which electrodes have lost skin contact. See [DeviceConfig] for the bits.
 class LeadStatus {
-  const LeadStatus({required this.raw, required this.allAttached});
-  final int raw;
-  final bool allAttached;
+  const LeadStatus({
+    required this.flags,
+    required this.receivedAt,
+    this.raw = const [],
+  });
+
+  final int flags;
+  final DateTime receivedAt;
+
+  /// The whole packet as received, for the live readings screen.
+  final List<int> raw;
+
+  bool get pOff => (flags & DeviceConfig.leadOffP) != 0;
+  bool get nOff => (flags & DeviceConfig.leadOffN) != 0;
+  bool get refOff => (flags & DeviceConfig.leadOffRef) != 0;
+  bool get allAttached =>
+      (flags &
+          (DeviceConfig.leadOffP |
+              DeviceConfig.leadOffN |
+              DeviceConfig.leadOffRef |
+              DeviceConfig.leadOffAny)) ==
+      0;
+}
+
+/// One beat's worth of heart data from the firmware.
+class HeartReading {
+  const HeartReading({
+    required this.bpm,
+    required this.rrMs,
+    required this.rmssdMs,
+    required this.receivedAt,
+  });
+
+  final double bpm;
+  final int rrMs;
+
+  /// Null until the firmware has seen enough beats (it sends 0 until then).
+  final double? rmssdMs;
+
+  final DateTime receivedAt;
 }
 
 /// Talks to the real Munji device over BLE.
@@ -40,6 +78,13 @@ class RealMunjiDeviceService implements MunjiDeviceService {
   DeviceState _state = const DeviceState(phase: DevicePhase.idle);
   final _controller = StreamController<DeviceState>.broadcast();
 
+  /// Unpacked ECG packets.
+  ///
+  /// Nothing listens to this yet, and that is deliberate rather than
+  /// forgotten: the inference service does not exist, and raw ECG is not
+  /// stored — a single channel at 250 Hz is roughly 40 MB per patient per
+  /// day, with no clinical value until something classifies it. When the
+  /// inference endpoint lands, the window uploader subscribes here.
   final _ecg = StreamController<EcgPacket>.broadcast();
   Stream<EcgPacket> get ecgStream => _ecg.stream;
 
@@ -49,12 +94,62 @@ class RealMunjiDeviceService implements MunjiDeviceService {
   LeadStatus? _lastLeads;
   LeadStatus? get leads => _lastLeads;
 
+  final _heart = StreamController<HeartReading>.broadcast();
+  Stream<HeartReading> get heartStream => _heart.stream;
+
+  HeartReading? _lastHeart;
+
+  /// The latest reading, or null when none arrived within
+  /// [DeviceConfig.heartStaleAfter]. Screens show "no reading" on null and
+  /// never keep displaying an old value.
+  HeartReading? get heart {
+    final h = _lastHeart;
+    if (h == null) return null;
+    if (DateTime.now().difference(h.receivedAt) > DeviceConfig.heartStaleAfter) {
+      return null;
+    }
+    return h;
+  }
+
+  /// Throttles lastSeen updates: packets arrive ~31 times a second and the
+  /// state stream should not rebuild screens that often.
+  DateTime _lastSeenEmit = DateTime.fromMillisecondsSinceEpoch(0);
+
   String? _serial;
   String? get serialNumber => _serial;
+
+  /// Fallback identifier when the firmware reports no serial. Not equivalent:
+  /// on iOS this is a per-app identifier assigned by the OS, not the device's
+  /// real address, and it can change on reinstall.
+  String? get bleAddress => _device?.remoteId.str;
+
+  String? _firmware;
+  String? get firmwareVersion => _firmware;
 
   int? _lastSequence;
   int _droppedPackets = 0;
   int get droppedPackets => _droppedPackets;
+
+  int _packetsReceived = 0;
+  int get packetsReceived => _packetsReceived;
+
+  DateTime? _batteryAt;
+
+  /// When the battery level last arrived. Null until the first one.
+  DateTime? get batteryUpdatedAt => _batteryAt;
+
+  /// Zero the link counters. Used by the live readings screen so a test run
+  /// starts from a clean count.
+  void resetCounters() {
+    _droppedPackets = 0;
+    _packetsReceived = 0;
+  }
+
+  void _onBattery(List<int> v) {
+    if (v.isEmpty) return;
+    _batteryAt = DateTime.now();
+    _emit(_state.copyWith(battery: v.first));
+  }
 
   BluetoothDevice? _device;
   StreamSubscription<List<ScanResult>>? _scanSub;
@@ -63,6 +158,7 @@ class RealMunjiDeviceService implements MunjiDeviceService {
   StreamSubscription<List<int>>? _ecgSub;
   StreamSubscription<List<int>>? _batterySub;
   StreamSubscription<List<int>>? _leadSub;
+  StreamSubscription<List<int>>? _heartSub;
 
   @override
   DeviceState get state => _state;
@@ -73,6 +169,43 @@ class RealMunjiDeviceService implements MunjiDeviceService {
   void _emit(DeviceState next) {
     _state = next;
     if (!_controller.isClosed) _controller.add(next);
+  }
+
+  // ── Permissions ──────────────────────────────────────────────────────────
+
+  /// Android 12+ will not surface a single BLE result without these, and it
+  /// fails silently: the scan returns nothing and the adapter reads as
+  /// unavailable. flutter_blue_plus does not ask on our behalf, so this runs
+  /// before anything that touches the radio: refresh, scan and connect.
+  ///
+  /// Returns false when the user declines. iOS asks by itself on first use.
+  ///
+  /// Android allows one permission request at a time and throws on a second
+  /// one. refresh() and startScan() can both get here together, so callers
+  /// share the request that is already open instead of starting another.
+  Future<bool> _ensurePermissions() {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return Future.value(true);
+    }
+    return _permissionRequest ??=
+        _requestPermissions().whenComplete(() => _permissionRequest = null);
+  }
+
+  Future<bool>? _permissionRequest;
+
+  Future<bool> _requestPermissions() async {
+    final results = await [
+      Permission.bluetoothScan,
+      Permission.bluetoothConnect,
+    ].request();
+
+    final denied = results.entries.where((e) => !e.value.isGranted).toList();
+    if (denied.isEmpty) return true;
+
+    for (final e in denied) {
+      debugPrint('[ble] permission denied: ${e.key} → ${e.value}');
+    }
+    return false;
   }
 
   // ── Bluetooth radio ──────────────────────────────────────────────────────
@@ -132,6 +265,12 @@ class RealMunjiDeviceService implements MunjiDeviceService {
       _emit(_state.copyWith(phase: DevicePhase.bluetoothOff));
       return;
     }
+    // Asked here too: on Android the adapter itself reads as unavailable
+    // until the app holds these, so "turn on Bluetooth" would loop.
+    if (!await _ensurePermissions()) {
+      _emit(_state.copyWith(phase: DevicePhase.bluetoothOff));
+      return;
+    }
     if (!await _waitForAdapterOn()) {
       _emit(_state.copyWith(phase: DevicePhase.bluetoothOff));
       return;
@@ -145,10 +284,25 @@ class RealMunjiDeviceService implements MunjiDeviceService {
 
   // ── Scanning ─────────────────────────────────────────────────────────────
 
+  /// The scan in progress, if any. A second tap joins it instead of starting
+  /// a new one: Android blocks an app that starts more than five scans in 30
+  /// seconds, and the block is silent (onScannerRegistered status=6).
+  Future<void>? _scanInFlight;
+
   @override
-  Future<void> startScan() async {
+  Future<void> startScan() =>
+      _scanInFlight ??= _scan().whenComplete(() => _scanInFlight = null);
+
+  Future<void> _scan() async {
     if (!DeviceConfig.isConfigured) {
       debugPrint('[ble] DeviceConfig is empty');
+      return;
+    }
+
+    if (!await _ensurePermissions()) {
+      // Staying on idle keeps the button on screen, so declining once is
+      // recoverable: the next tap asks again.
+      _emit(_state.copyWith(phase: DevicePhase.idle));
       return;
     }
 
@@ -161,6 +315,7 @@ class RealMunjiDeviceService implements MunjiDeviceService {
     debugPrint('[ble] scanning for "${DeviceConfig.namePrefix}…"');
 
     var found = false;
+    final foundSignal = Completer<void>();
 
     await _scanSub?.cancel();
     _scanSub = FlutterBluePlus.scanResults.listen((results) {
@@ -177,6 +332,7 @@ class RealMunjiDeviceService implements MunjiDeviceService {
 
         found = true;
         _device = r.device;
+        if (!foundSignal.isCompleted) foundSignal.complete();
         FlutterBluePlus.stopScan();
         _emit(_state.copyWith(
           phase: DevicePhase.found,
@@ -194,11 +350,22 @@ class RealMunjiDeviceService implements MunjiDeviceService {
       // service filters against what is actually advertised. Filtering here
       // would hide the device completely. We match on the name instead.
       await FlutterBluePlus.startScan(timeout: const Duration(seconds: 15));
+
+      // startScan returns as soon as the radio starts scanning; the timeout
+      // stops it later. Wait here for the device or for the scan to end, so
+      // the screen stays on "searching" for the whole window instead of
+      // bouncing back to the button straight away.
+      final ended =
+          FlutterBluePlus.isScanning.where((scanning) => !scanning).first;
+      await Future.any([foundSignal.future, ended])
+          .timeout(const Duration(seconds: 20), onTimeout: () {});
     } catch (e) {
       debugPrint('[ble] scan failed: $e');
     }
 
-    // startScan returns when the timeout elapses.
+    await _scanSub?.cancel();
+    _scanSub = null;
+
     if (!found && _state.phase == DevicePhase.scanning) {
       debugPrint('[ble] no Munji device in range');
       _emit(_state.copyWith(
@@ -218,6 +385,8 @@ class RealMunjiDeviceService implements MunjiDeviceService {
 
   @override
   Future<void> connect() async {
+    if (!await _ensurePermissions()) return;
+
     final device = _device;
     if (device == null) {
       await startScan();
@@ -233,6 +402,10 @@ class RealMunjiDeviceService implements MunjiDeviceService {
         license: License.nonprofit,
       );
       debugPrint('[ble] connected to ${device.platformName}');
+
+      // A new link may restart the firmware's counter. Without this reset the
+      // first packet after a reconnect reads as thousands of dropped ones.
+      _lastSequence = null;
 
       await _connSub?.cancel();
       _connSub = device.connectionState.listen((s) {
@@ -270,6 +443,8 @@ class RealMunjiDeviceService implements MunjiDeviceService {
     final leadUuid = Guid(DeviceConfig.leadOffCharacteristicUuid);
     final batteryUuid = Guid(DeviceConfig.batteryCharacteristicUuid);
     final serialUuid = Guid(DeviceConfig.serialNumberCharacteristicUuid);
+    final firmwareUuid = Guid(DeviceConfig.firmwareRevisionCharacteristicUuid);
+    final heartUuid = Guid(DeviceConfig.heartCharacteristicUuid);
 
     for (final service in services) {
       for (final c in service.characteristics) {
@@ -287,23 +462,31 @@ class RealMunjiDeviceService implements MunjiDeviceService {
             if (v.isNotEmpty) _onLeadStatus(v);
           }
           debugPrint('[ble] subscribed to lead-off');
+        } else if (c.uuid == heartUuid) {
+          await c.setNotifyValue(true);
+          await _heartSub?.cancel();
+          _heartSub = c.lastValueStream.listen(_onHeart);
+          debugPrint('[ble] subscribed to heart');
         } else if (c.uuid == batteryUuid) {
           if (c.properties.read) {
-            final v = await c.read();
-            if (v.isNotEmpty) _emit(_state.copyWith(battery: v.first));
+            _onBattery(await c.read());
           }
           if (c.properties.notify) {
             await c.setNotifyValue(true);
             await _batterySub?.cancel();
-            _batterySub = c.lastValueStream.listen((v) {
-              if (v.isNotEmpty) _emit(_state.copyWith(battery: v.first));
-            });
+            _batterySub = c.lastValueStream.listen(_onBattery);
           }
         } else if (c.uuid == serialUuid) {
           if (c.properties.read) {
             final v = await c.read();
             _serial = String.fromCharCodes(v).trim();
             debugPrint('[ble] serial: $_serial');
+          }
+        } else if (c.uuid == firmwareUuid) {
+          if (c.properties.read) {
+            final v = await c.read();
+            _firmware = String.fromCharCodes(v).trim();
+            debugPrint('[ble] firmware: $_firmware');
           }
         }
       }
@@ -335,6 +518,7 @@ class RealMunjiDeviceService implements MunjiDeviceService {
       }
     }
     _lastSequence = sequence;
+    _packetsReceived++;
 
     final samples = <int>[];
     for (var i = 0; i < DeviceConfig.samplesPerPacket; i++) {
@@ -353,17 +537,44 @@ class RealMunjiDeviceService implements MunjiDeviceService {
       ));
     }
 
-    _emit(_state.copyWith(lastSeen: DateTime.now()));
+    final now = DateTime.now();
+    if (now.difference(_lastSeenEmit) >= const Duration(seconds: 1)) {
+      _lastSeenEmit = now;
+      _emit(_state.copyWith(lastSeen: now));
+    }
   }
 
-  /// Electrode contact. A non-zero byte means at least one lead is off.
+  /// Electrode contact. Byte 0 carries the flags; 1 means detached.
   void _onLeadStatus(List<int> bytes) {
     if (bytes.isEmpty) return;
-    final raw = bytes.first;
-    final status = LeadStatus(raw: raw, allAttached: raw == 0);
+    final status = LeadStatus(
+      flags: bytes.first,
+      receivedAt: DateTime.now(),
+      raw: List.unmodifiable(bytes),
+    );
+    final changed = _lastLeads?.allAttached != status.allAttached;
     _lastLeads = status;
     if (!_leads.isClosed) _leads.add(status);
-    debugPrint('[ble] leads attached: ${status.allAttached}');
+    if (changed) debugPrint('[ble] leads attached: ${status.allAttached}');
+  }
+
+  /// One beat: BPM x 10, RR ms, RMSSD x 10, all uint16 little-endian.
+  void _onHeart(List<int> bytes) {
+    if (bytes.length < DeviceConfig.heartPacketBytes) return;
+    final data = ByteData.sublistView(Uint8List.fromList(bytes));
+    final bpm10 = data.getUint16(0, Endian.little);
+    final rr = data.getUint16(2, Endian.little);
+    final rmssd10 = data.getUint16(4, Endian.little);
+    if (bpm10 == 0) return;
+
+    final reading = HeartReading(
+      bpm: bpm10 / 10,
+      rrMs: rr,
+      rmssdMs: rmssd10 == 0 ? null : rmssd10 / 10,
+      receivedAt: DateTime.now(),
+    );
+    _lastHeart = reading;
+    if (!_heart.isClosed) _heart.add(reading);
   }
 
   // ── Forgetting ───────────────────────────────────────────────────────────
@@ -373,15 +584,20 @@ class RealMunjiDeviceService implements MunjiDeviceService {
     await _ecgSub?.cancel();
     await _batterySub?.cancel();
     await _leadSub?.cancel();
+    await _heartSub?.cancel();
     await _connSub?.cancel();
     try {
       await _device?.disconnect();
     } catch (_) {}
     _device = null;
     _serial = null;
+    _firmware = null;
     _lastSequence = null;
     _droppedPackets = 0;
+    _packetsReceived = 0;
+    _batteryAt = null;
     _lastLeads = null;
+    _lastHeart = null;
     _emit(const DeviceState(phase: DevicePhase.idle));
   }
 
@@ -393,8 +609,10 @@ class RealMunjiDeviceService implements MunjiDeviceService {
     _ecgSub?.cancel();
     _batterySub?.cancel();
     _leadSub?.cancel();
+    _heartSub?.cancel();
     _controller.close();
     _ecg.close();
     _leads.close();
+    _heart.close();
   }
 }

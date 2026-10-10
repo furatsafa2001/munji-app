@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'device_registry.dart';
+
 /// MUNJI device connection.
 ///
 /// The Munji device is meant to be connected at all times — it is worn, it
@@ -257,13 +259,21 @@ class MunjiDevice {
   MunjiDevice._();
 
   static MunjiDeviceService? _instance;
+  static DeviceRegistry? _registry;
 
   static MunjiDeviceService get instance =>
       _instance ??= FakeMunjiDeviceService(alreadyPaired: false);
 
+  /// Keeps devices/{uid} in step with the link. Created lazily so tests can
+  /// construct the service without touching Firestore.
+  static DeviceRegistry get registry =>
+      _registry ??= DeviceRegistry(service: instance);
+
   /// Swap in the real BLE implementation here once the firmware exists.
   static void use(MunjiDeviceService service) {
     _instance?.dispose();
+    _registry?.stop();
+    _registry = null;
     _instance = service;
   }
 }

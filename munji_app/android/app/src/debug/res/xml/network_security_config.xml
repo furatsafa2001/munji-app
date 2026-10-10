@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds only: plain HTTP to the local Firebase emulator, whose
+     address is the Mac's LAN IP and changes with the network. Release builds
+     use src/main/res/xml/network_security_config.xml, encrypted only. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

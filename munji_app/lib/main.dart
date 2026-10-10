@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -7,30 +8,42 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'firebase_options.dart';
+import 'theme/munji_theme.dart';
 import 'services/device_config.dart';
 import 'services/device_service.dart';
 import 'services/real_device_service.dart';
-import 'theme/munji_theme.dart';
 import 'screens/sign_in_screen.dart';
 import 'screens/auth_gate.dart';
 
-/// true  = local Firebase emulator
-/// false = the real munji-dev project
-const bool useEmulator = false;
+/// Which backend this build talks to, chosen when building, not in code:
+///
+///   flutter run                       real munji-dev project (default)
+///   ./scripts/run_emulator.sh         local emulator on this Mac
+///
+/// The script passes --dart-define=MUNJI_EMULATOR=true and the Mac's LAN IP.
+/// Keeping it out of the source means a build for the hardware engineer can
+/// never point at someone's laptop by accident.
+const bool useEmulator = bool.fromEnvironment('MUNJI_EMULATOR');
 
-/// Only used when useEmulator is true.
-/// Android emulator: 10.0.2.2   |   physical phone: the Mac's LAN IP
-const String emulatorHost = '10.0.2.2';
+/// The Mac running `npm run emu`. A physical phone needs the Mac's LAN IP;
+/// the Android emulator can use 10.0.2.2.
+const String emulatorHost =
+    String.fromEnvironment('MUNJI_EMULATOR_HOST', defaultValue: '10.0.2.2');
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
-  if (useEmulator) {
+  // Never in a release build: release only allows encrypted traffic, and an
+  // APK handed to someone else must reach the real backend.
+  if (useEmulator && !kReleaseMode) {
+    debugPrint('[munji] using emulator at $emulatorHost');
     await FirebaseAuth.instance.useAuthEmulator(emulatorHost, 9099);
     FirebaseFirestore.instance.useFirestoreEmulator(emulatorHost, 8080);
   }
 
+  // The real patch over BLE. Without this line the app silently runs on the
+  // simulator, which is how the 9 October build lost the device.
   if (DeviceConfig.isConfigured) {
     MunjiDevice.use(RealMunjiDeviceService());
   }
@@ -84,6 +97,8 @@ class _MunjiAppState extends State<MunjiApp> {
           debugPrint('[gate] user=${user?.email} verified=${user?.emailVerified}');
 
           if (user == null) {
+            // nobody to report device status for
+            MunjiDevice.registry.stop();
             return SignInScreen(
               isArabic: _isArabic,
               onLocaleChanged: _onLocaleChanged,
@@ -94,6 +109,8 @@ class _MunjiAppState extends State<MunjiApp> {
             return VerifyEmailScreen(isArabic: _isArabic);
           }
 
+          // Routes by role, and sends a patient with no paired device
+          // through device setup first.
           return AuthGate(
             isArabic: _isArabic,
             onLocaleChanged: _onLocaleChanged,

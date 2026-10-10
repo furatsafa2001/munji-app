@@ -16,11 +16,22 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
 if (!process.env.FIREBASE_AUTH_EMULATOR_HOST) {
   process.env.FIREBASE_AUTH_EMULATOR_HOST = 'localhost:9099';
 }
+if (!process.env.FIREBASE_STORAGE_EMULATOR_HOST) {
+  process.env.FIREBASE_STORAGE_EMULATOR_HOST = 'localhost:9199';
+}
 
-admin.initializeApp({ projectId: 'munji-dev' });
+const { buildRecording } = require('../functions/src/ecgFormat');
+const { computeDailyVitals } = require('../functions/src/daily');
+const { hourKey, dayKey, dayStartMs, DAY_MS } = require('../functions/src/riyadh');
+
+const BUCKET = 'munji-dev.firebasestorage.app';
+
+admin.initializeApp({ projectId: 'munji-dev', storageBucket: BUCKET });
 const db = admin.firestore();
 const auth = admin.auth();
-const now = admin.firestore.Timestamp.now;
+const { Timestamp } = admin.firestore;
+const now = Timestamp.now;
+const HOUR_MS = 60 * 60 * 1000;
 
 const SAFA = 'uid_patient_safa';
 const AHMED = 'uid_patient_ahmed';
@@ -57,7 +68,6 @@ async function main() {
       knownConditions: ['hypertension'],
       emergencyNumber: '911',
       caregiverIds: [NORA],
-      activeDeviceId: SAFA
     }
   });
 
@@ -76,7 +86,6 @@ async function main() {
       knownConditions: [],
       emergencyNumber: '911',
       caregiverIds: [NORA],
-      activeDeviceId: AHMED
     }
   });
 
@@ -92,16 +101,44 @@ async function main() {
     caregiver: { patientIds: [SAFA, AHMED] }
   });
 
-  // ----------------------------------------------------------- devices
-  batch.set(db.doc(`devices/${SAFA}`), {
-    patientId: SAFA, serial: 'MJ-4F2A', model: 'munji-v1', firmware: '0.1.0',
-    pairedAt: now(), status: 'paired', battery: 85,
-    signalQuality: 'good', lastSeenAt: now()
+  // ------------------------------------------------- device/current
+  // one document per patient, overwritten on each update
+  const device = (serial, battery) => ({
+    status: 'paired', serial, model: 'munji-v1', firmware: null,
+    pairedAt: now(), connected: true, charging: null, worn: null,
+    battery, lastSeenAt: now()
   });
-  batch.set(db.doc(`devices/${AHMED}`), {
-    patientId: AHMED, serial: 'MJ-7B11', model: 'munji-v1', firmware: '0.1.0',
-    pairedAt: now(), status: 'paired', battery: 64,
-    signalQuality: 'good', lastSeenAt: now()
+  batch.set(db.doc(`users/${SAFA}/device/current`), device('MUNJI-3C84270B4F2A', 85));
+  batch.set(db.doc(`users/${AHMED}/device/current`), device('MUNJI-3C84270B7B11', 64));
+
+  // ---------------------------------------------------- hourly + daily
+  // yesterday, 08:00 to 13:00 Riyadh, so the history screen has data
+  const yKey = dayKey(Date.now() - DAY_MS);
+  const yStart = dayStartMs(yKey);
+  const hours = [];
+  for (let h = 8; h < 14; h++) {
+    const start = yStart + h * HOUR_MS;
+    const doc = {
+      hourStart: Timestamp.fromMillis(start),
+      dayKey: yKey,
+      hrAvg: 68 + h, hrMin: 55 + h, hrMax: 90 + h, hrvAvg: 38 + h / 2, qualityPct: null,
+      monitoredMin: h === 11 ? 20 : 55, leadOffMin: 5, chargingMin: h === 11 ? 35 : 0,
+      disconnectedMin: 0,
+      expireAt: Timestamp.fromMillis(start + 90 * DAY_MS),
+      createdAt: now()
+    };
+    hours.push(doc);
+    batch.set(db.doc(`users/${SAFA}/hourly/${hourKey(start)}`), doc);
+  }
+  // the trigger builds this in real life; written here so the seed works
+  // without the functions emulator
+  batch.set(db.doc(`users/${SAFA}/daily/${yKey}`), {
+    dayKey: yKey,
+    date: Timestamp.fromMillis(yStart),
+    ...computeDailyVitals(hours),
+    recordingsCount: 0,
+    expireAt: Timestamp.fromMillis(yStart + 730 * DAY_MS),
+    updatedAt: now()
   });
 
   // --------------------------------------------------------- careLinks
@@ -145,22 +182,6 @@ async function main() {
     });
   });
 
-  // -------------------------------------------------------- recordings
-  // written by the storage finalize trigger in real life; seeded here so
-  // the collection exists and the mobile team has something to read
-  batch.set(db.doc('recordings/rec_seed_1'), {
-    patientId: SAFA,
-    startedAt: now(),
-    durationSec: 30,
-    avgHr: 74,
-    resultClass: null,
-    resultTier: null,
-    storagePath: `recordings/${SAFA}/rec_seed_1.json.gz`,
-    pdfPath: null,
-    createdBy: SAFA,
-    modelVersion: null
-  });
-
   // ---------------------------------------------------------- auditLog
   batch.set(db.doc('auditLog/log_seed_1'), {
     actorId: 'system',
@@ -173,14 +194,36 @@ async function main() {
   });
 
   await batch.commit();
-  console.log('seeded 7 collections:');
-  console.log('  users        3   safa, ahmed, nora');
-  console.log('  devices      2   one per patient, id = patient uid');
-  console.log('  careLinks    2   both patients linked to nora');
-  console.log('  linkCodes    1   482913, expires in 15 min');
-  console.log('  medAlarms    3   one added by the caregiver');
-  console.log('  recordings   1   rec_seed_1');
-  console.log('  auditLog     1   log_seed_1');
+
+  // --------------------------------------------------------- recording
+  // Uploaded as a real file. With the functions emulator running, the
+  // finalize trigger validates it and creates users/{safa}/recordings/...
+  const samples = Array.from({ length: 7500 }, (_, i) =>
+    Math.round(600 * Math.exp(-(((i % 208) - 40) ** 2) / 20)));    // ~72 bpm spikes
+  let recordingNote = 'skipped (storage emulator not running)';
+  try {
+    await admin.storage().bucket().file(`patients/${SAFA}/recordings/rec_seed_0001.ecg`).save(
+      buildRecording({ samples, startedAtMs: Date.now() - 10 * 60 * 1000 }),
+      {
+        contentType: 'application/octet-stream',
+        metadata: { metadata: { kind: 'manual', avgHr: '72', deviceSerial: 'MUNJI-3C84270B4F2A' } }
+      }
+    );
+    recordingNote = 'uploaded, the trigger creates its document';
+  } catch (e) {
+    // storage emulator not started; the rest of the seed is still usable
+  }
+
+  console.log('seeded:');
+  console.log('  users              3   safa, ahmed, nora');
+  console.log('  device/current     2   one per patient');
+  console.log(`  hourly             6   safa, ${yKey} 08:00-13:00`);
+  console.log('  daily              1   safa, yesterday');
+  console.log('  careLinks          2   both patients linked to nora');
+  console.log('  linkCodes          1   482913, expires in 15 min');
+  console.log('  medAlarms          3   one added by the caregiver');
+  console.log('  auditLog           1   log_seed_1');
+  console.log(`  recording          1   ${recordingNote}`);
   console.log('passwords: Test1234!');
 }
 

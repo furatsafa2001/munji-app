@@ -76,8 +76,33 @@ today and closes a hole you'd never think to look for.
 
 1. Rules + emulator + seed **← done**
 2. Auth and account creation **← done** (`src/accounts.js`)
-3. `linkCode_generate` / `linkCode_redeem`, `careLinks`, App Check
-4. Signed upload/download URLs, finalize trigger writes `recordings`
+3. Patient data under `users/{uid}`, Storage rules, recording validation,
+   hourly and daily summaries **← done, emulator only until CNTXT billing**
+4. `linkCode_generate` / `linkCode_redeem`, App Check, account deletion
+
+### Functions (`functions/`)
+
+| Function | Trigger | Does |
+|---|---|---|
+| `onRecordingUploaded` | Storage finalize | validates the `.ecg`, creates `users/{uid}/recordings/{id}` |
+| `onRecordingDeleted` | Storage delete | removes the document |
+| `purgeRecordingsDaily` | 03:00 Riyadh | deletes unsaved recordings after 90 days |
+| `onHourlyCreated` | Firestore create | rebuilds `users/{uid}/daily/{day}` |
+
+All run in `me-central2`. The bucket name comes from `functions/.env`
+(`ECG_BUCKET`), and the app must use the same bucket.
+
+```bash
+npm --prefix functions install
+npm run test:functions     # unit tests, no emulator needed
+npm run emu                # now also starts functions + storage
+npm run seed               # uploads a sample recording; the trigger validates it
+```
+
+TTL on `hourly.expireAt` and `daily.expireAt` is declared in
+`firestore.indexes.json`. If the deploy rejects the `ttl` key, set it with
+`gcloud firestore fields ttls update expireAt --collection-group=hourly --enable-ttl`
+(and the same for `daily`).
 
 ---
 
@@ -118,7 +143,8 @@ Step 4 is the first point where the mobile app stores something real.
 
 ## Indexes
 
-Two, because two queries need them. Firestore errors on a missing composite
+Two composite indexes, because two queries need them: caregiver links, and
+the collection-group query that finds expired unsaved recordings. Firestore errors on a missing composite
 index and prints the exact index to add, so there's no reason to guess ahead
 of a real query — speculative indexes just cost write throughput on every
 document you touch.
@@ -127,8 +153,9 @@ document you touch.
 
 ## Rules: two invariants
 
-**Clients never write clinical data.** `events`, `recordings`, `alerts` and
-`vitalsDaily` are server-written. A client that can write an event can
+**Clients never write clinical data.** `events`, `recordings` and `daily`
+are server-written. The phone writes only what it measures: `device/current`
+and `hourly`, both shape-checked with server timestamps. A client that can write an event can
 fabricate a cardiac emergency, or hide a real one.
 
 **The care relationship is server-written.** `caregiverIds` is denormalised
@@ -155,8 +182,8 @@ ends access — every rule reads that list, so the effect is immediate across
 profile, device, alarms and recordings. The `careLink` document stays,
 marked `revoked`, because who had access and when is worth keeping.
 
-**One device per patient.** The `devices` document ID *is* the patient's
-uid, so pairing a new device overwrites the old one. Two active devices for
+**One device per patient.** The device lives at `users/{uid}/device/current`,
+a single fixed id, so pairing a new device overwrites the old one. Two active devices for
 one patient are impossible by construction rather than by a check somebody
 has to remember to write.
 

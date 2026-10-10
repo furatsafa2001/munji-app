@@ -11,7 +11,10 @@
 const fs = require('fs');
 const { initializeTestEnvironment, assertFails, assertSucceeds } =
   require('@firebase/rules-unit-testing');
-const { doc, getDoc, setDoc, updateDoc, deleteDoc } = require('firebase/firestore');
+const {
+  doc, getDoc, setDoc, updateDoc, deleteDoc, serverTimestamp, Timestamp
+} = require('firebase/firestore');
+const { hourKey } = require('../functions/src/riyadh');
 
 const SAFA = 'uid_patient_safa';
 const AHMED = 'uid_patient_ahmed';
@@ -19,6 +22,7 @@ const NORA = 'uid_caregiver_nora';
 const STRANGER = 'uid_stranger';
 
 let env;
+const PAIRED_AT = new Date('2026-10-01T08:00:00Z');
 
 beforeAll(async () => {
   env = await initializeTestEnvironment({
@@ -58,18 +62,25 @@ beforeEach(async () => {
       createdAt: new Date(), disabled: false,
       caregiver: { patientIds: [SAFA] }
     });
-    await setDoc(doc(db, 'devices', SAFA), {
-      patientId: SAFA, serial: 'MJ-4F2A', model: 'munji-v1',
-      status: 'paired', pairedAt: new Date(), battery: 85
+    await setDoc(doc(db, 'users', SAFA, 'device', 'current'), {
+      status: 'paired', serial: 'MUNJI-3C84270B4F2A', model: 'munji-v1', firmware: null,
+      pairedAt: PAIRED_AT, connected: true, charging: null, worn: null,
+      battery: 85, lastSeenAt: new Date()
     });
+    await setDoc(doc(db, 'users', SAFA, 'recordings', 'rec_seed_0001'), {
+      kind: 'manual', startedAt: new Date(), durationSec: 30, sampleRateHz: 250,
+      uvPerLsb: 1.5258789, storagePath: `patients/${SAFA}/recordings/rec_seed_0001.ecg`,
+      avgHr: 74, saved: false, createdAt: new Date()
+    });
+    await setDoc(doc(db, 'users', SAFA, 'daily', '20261009'), { dayKey: '20261009', hrAvg: 72 });
     await setDoc(doc(db, 'careLinks', `${SAFA}_${NORA}`), {
       patientId: SAFA, caregiverId: NORA, status: 'active', priority: 1
     });
     await setDoc(doc(db, 'careLinks', `${AHMED}_${NORA}`), {
       patientId: AHMED, caregiverId: NORA, status: 'active', priority: 1
     });
-    await setDoc(doc(db, 'events', 'evt1'), {
-      patientId: SAFA, class: 'afib', tier: 'crit', hr: 132
+    await setDoc(doc(db, 'users', SAFA, 'events', 'evt1'), {
+      type: 'afib', tier: 'crit', source: 'model', startedAt: new Date(), hrAtEvent: 132
     });
     await setDoc(doc(db, 'medAlarms', `${SAFA}_aspirin100mg`), {
       patientId: SAFA, medKey: 'aspirin100mg', medName: 'Aspirin 100 mg',
@@ -121,21 +132,21 @@ test('patient can update their own phone number', async () => {
 // ----------------------------------------------------------------- events
 
 test('linked caregiver reads events', async () => {
-  await assertSucceeds(getDoc(doc(as(NORA), 'events', 'evt1')));
+  await assertSucceeds(getDoc(doc(as(NORA), 'users', SAFA, 'events', 'evt1')));
 });
 
 test('unlinked user cannot read events', async () => {
-  await assertFails(getDoc(doc(as(STRANGER), 'events', 'evt1')));
+  await assertFails(getDoc(doc(as(STRANGER), 'users', SAFA, 'events', 'evt1')));
 });
 
 test('patient cannot fabricate an event', async () => {
-  await assertFails(setDoc(doc(as(SAFA), 'events', 'evt_fake'), {
-    patientId: SAFA, class: 'vt', tier: 'crit'
+  await assertFails(setDoc(doc(as(SAFA), 'users', SAFA, 'events', 'evt_fake'), {
+    type: 'vt', tier: 'crit', source: 'model', startedAt: new Date()
   }));
 });
 
 test('patient cannot suppress an event', async () => {
-  await assertFails(deleteDoc(doc(as(SAFA), 'events', 'evt1')));
+  await assertFails(deleteDoc(doc(as(SAFA), 'users', SAFA, 'events', 'evt1')));
 });
 
 // -------------------------------------------------------------- medAlarms
@@ -200,7 +211,8 @@ test('a revoked caregiver loses access immediately', async () => {
     });
   });
   await assertFails(getDoc(doc(as(NORA), 'users', SAFA)));
-  await assertFails(getDoc(doc(as(NORA), 'devices', SAFA)));
+  await assertFails(getDoc(doc(as(NORA), 'users', SAFA, 'device', 'current')));
+  await assertFails(getDoc(doc(as(NORA), 'users', SAFA, 'recordings', 'rec_seed_0001')));
   await assertFails(updateDoc(doc(as(NORA), 'medAlarms', `${SAFA}_aspirin100mg`), { enabled: false }));
 });
 
@@ -273,30 +285,181 @@ test('valid new account is accepted', async () => {
   }));
 });
 
-// --------------------------------------------------------------- devices
+// --------------------------------------------------------- device/current
 
-test('patient updates their own device battery', async () => {
-  await assertSucceeds(updateDoc(doc(as(SAFA), 'devices', SAFA), { battery: 70 }));
+const deviceRef = (who) => doc(as(who), 'users', SAFA, 'device', 'current');
+
+const deviceUpdate = (o = {}) => ({
+  status: 'paired', serial: 'MUNJI-3C84270B4F2A', model: 'munji-v1', firmware: null,
+  pairedAt: PAIRED_AT, connected: true, charging: false, worn: true,
+  battery: 70, lastSeenAt: serverTimestamp(), ...o
+});
+
+test('patient updates their device status', async () => {
+  await assertSucceeds(setDoc(deviceRef(SAFA), deviceUpdate()));
+});
+
+test('charging and worn may be null until the firmware reports them', async () => {
+  await assertSucceeds(setDoc(deviceRef(SAFA), deviceUpdate({ charging: null, worn: null })));
 });
 
 test('battery outside 0-100 is rejected', async () => {
-  await assertFails(updateDoc(doc(as(SAFA), 'devices', SAFA), { battery: 150 }));
+  await assertFails(setDoc(deviceRef(SAFA), deviceUpdate({ battery: 150 })));
 });
 
-test('a device document cannot be created under someone else\'s id', async () => {
-  await assertFails(setDoc(doc(as(SAFA), 'devices', 'dev_second'), {
-    patientId: SAFA, serial: 'MJ-9999', model: 'munji-v1',
-    status: 'paired', pairedAt: new Date(), battery: 90
-  }));
+test('lastSeenAt from the phone clock is rejected', async () => {
+  await assertFails(setDoc(deviceRef(SAFA), deviceUpdate({ lastSeenAt: new Date() })));
 });
 
-test('device cannot be reassigned to another patient', async () => {
-  await assertFails(updateDoc(doc(as(SAFA), 'devices', SAFA), { patientId: AHMED }));
+test('unknown fields on the device are rejected', async () => {
+  await assertFails(setDoc(deviceRef(SAFA), deviceUpdate({ hr: 72 })));
+});
+
+test('only the document id "current" is allowed', async () => {
+  await assertFails(setDoc(doc(as(SAFA), 'users', SAFA, 'device', 'second'),
+    deviceUpdate({ pairedAt: serverTimestamp() })));
+});
+
+test('pairing a different device resets pairedAt to now', async () => {
+  await assertSucceeds(setDoc(deviceRef(SAFA),
+    deviceUpdate({ serial: 'MUNJI-AABBCCDDEEFF', pairedAt: serverTimestamp() })));
+});
+
+test('pairing a different device cannot keep the old pairedAt', async () => {
+  await assertFails(setDoc(deviceRef(SAFA), deviceUpdate({ serial: 'MUNJI-AABBCCDDEEFF' })));
+});
+
+test('patient cannot write another patient\'s device', async () => {
+  await assertFails(setDoc(doc(as(SAFA), 'users', AHMED, 'device', 'current'),
+    deviceUpdate({ pairedAt: serverTimestamp() })));
 });
 
 test('caregiver can read the device but not write it', async () => {
-  await assertSucceeds(getDoc(doc(as(NORA), 'devices', SAFA)));
-  await assertFails(updateDoc(doc(as(NORA), 'devices', SAFA), { battery: 10 }));
+  await assertSucceeds(getDoc(deviceRef(NORA)));
+  await assertFails(setDoc(deviceRef(NORA), deviceUpdate()));
+});
+
+test('stranger cannot read the device', async () => {
+  await assertFails(getDoc(deviceRef(STRANGER)));
+});
+
+// ------------------------------------------------------------- recordings
+
+const recRef = (who) => doc(as(who), 'users', SAFA, 'recordings', 'rec_seed_0001');
+
+test('patient and linked caregiver read a recording', async () => {
+  await assertSucceeds(getDoc(recRef(SAFA)));
+  await assertSucceeds(getDoc(recRef(NORA)));
+});
+
+test('stranger cannot read a recording', async () => {
+  await assertFails(getDoc(recRef(STRANGER)));
+});
+
+test('patient saves a recording', async () => {
+  await assertSucceeds(updateDoc(recRef(SAFA), { saved: true }));
+});
+
+test('patient cannot change anything but saved', async () => {
+  await assertFails(updateDoc(recRef(SAFA), { avgHr: 60 }));
+  await assertFails(updateDoc(recRef(SAFA), { saved: true, durationSec: 60 }));
+});
+
+test('caregiver cannot save a recording', async () => {
+  await assertFails(updateDoc(recRef(NORA), { saved: true }));
+});
+
+test('nobody creates or deletes a recording document from the client', async () => {
+  await assertFails(setDoc(doc(as(SAFA), 'users', SAFA, 'recordings', 'rec_fake_0001'), {
+    kind: 'manual', durationSec: 30, saved: true
+  }));
+  await assertFails(deleteDoc(recRef(SAFA)));
+});
+
+// ----------------------------------------------------------------- hourly
+
+const HOUR_MS = 60 * 60 * 1000;
+const lastHourStart = () => Math.floor(Date.now() / HOUR_MS) * HOUR_MS - HOUR_MS;
+
+const hourDoc = (startMs, o = {}) => {
+  const key = hourKey(startMs);
+  return {
+    key,
+    data: {
+      hourStart: Timestamp.fromMillis(startMs),
+      dayKey: key.slice(0, 8),
+      hrAvg: 72, hrMin: 58, hrMax: 96, hrvAvg: 41.5, qualityPct: null,
+      monitoredMin: 50, leadOffMin: 5, chargingMin: 0, disconnectedMin: 5,
+      expireAt: Timestamp.fromMillis(startMs + 90 * 24 * HOUR_MS),
+      createdAt: serverTimestamp(),
+      ...o
+    }
+  };
+};
+
+const hourRef = (who, key, patient = SAFA) => doc(as(who), 'users', patient, 'hourly', key);
+
+test('patient uploads a finished hour', async () => {
+  const h = hourDoc(lastHourStart());
+  await assertSucceeds(setDoc(hourRef(SAFA, h.key), h.data));
+});
+
+test('the same hour cannot be uploaded twice', async () => {
+  const h = hourDoc(lastHourStart());
+  await assertSucceeds(setDoc(hourRef(SAFA, h.key), h.data));
+  await assertFails(setDoc(hourRef(SAFA, h.key), h.data));
+});
+
+test('an hour that has not finished is rejected', async () => {
+  const h = hourDoc(lastHourStart() + HOUR_MS);
+  await assertFails(setDoc(hourRef(SAFA, h.key), h.data));
+});
+
+test('the id must be the Riyadh hour of hourStart', async () => {
+  const h = hourDoc(lastHourStart());
+  const utcKey = new Date(lastHourStart()).toISOString().slice(0, 13).replace(/[-T]/g, '');
+  await assertFails(setDoc(hourRef(SAFA, utcKey), { ...h.data, dayKey: utcKey.slice(0, 8) }));
+});
+
+test('minutes cannot add up to more than 60', async () => {
+  const h = hourDoc(lastHourStart(), { monitoredMin: 60, leadOffMin: 10 });
+  await assertFails(setDoc(hourRef(SAFA, h.key), h.data));
+});
+
+test('heart rate outside 20-300 is rejected', async () => {
+  const h = hourDoc(lastHourStart(), { hrMax: 400 });
+  await assertFails(setDoc(hourRef(SAFA, h.key), h.data));
+});
+
+test('expireAt must be exactly 90 days after the hour', async () => {
+  const h = hourDoc(lastHourStart(), { expireAt: Timestamp.fromMillis(Date.now() + 400 * 24 * HOUR_MS) });
+  await assertFails(setDoc(hourRef(SAFA, h.key), h.data));
+});
+
+test('caregiver cannot upload an hour for the patient', async () => {
+  const h = hourDoc(lastHourStart());
+  await assertFails(setDoc(hourRef(NORA, h.key), h.data));
+});
+
+test('linked caregiver reads hours, stranger does not', async () => {
+  const h = hourDoc(lastHourStart());
+  await setDoc(hourRef(SAFA, h.key), h.data);
+  await assertSucceeds(getDoc(hourRef(NORA, h.key)));
+  await assertFails(getDoc(hourRef(STRANGER, h.key)));
+});
+
+// ------------------------------------------------------------------ daily
+
+test('daily summary is readable and never client-written', async () => {
+  await assertSucceeds(getDoc(doc(as(NORA), 'users', SAFA, 'daily', '20261009')));
+  await assertFails(setDoc(doc(as(SAFA), 'users', SAFA, 'daily', '20261009'), { hrAvg: 60 }));
+});
+
+// ---------------------------------------------------- retired collections
+
+test('the old top-level collections are closed', async () => {
+  await assertFails(getDoc(doc(as(SAFA), 'devices', SAFA)));
+  await assertFails(setDoc(doc(as(SAFA), 'recordings', 'x'), { patientId: SAFA }));
 });
 
 // ------------------------------------------------------------- careLinks

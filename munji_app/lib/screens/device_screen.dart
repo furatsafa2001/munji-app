@@ -4,9 +4,12 @@ import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 
 import '../l10n/device_strings.dart';
+import '../services/device_config.dart';
 import '../services/device_service.dart';
+import '../services/real_device_service.dart';
 import '../theme/munji_theme.dart';
 import '../widgets/pairing_orb.dart';
+import 'live_readings_screen.dart';
 
 /// Why this screen exists twice.
 ///
@@ -332,6 +335,18 @@ class _DeviceScreenState extends State<DeviceScreen> {
                 else
                   SizedBox(height: (w * 0.17).clamp(48, 54)),
 
+                // Bench testing only, see DeviceConfig.showLiveReadings.
+                if (_state.phase == DevicePhase.connected &&
+                    DeviceConfig.showLiveReadings &&
+                    _service is RealMunjiDeviceService)
+                  TextButton(
+                    onPressed: _openLiveReadings,
+                    child: Text(
+                      widget.isArabic ? 'القراءات المباشرة' : 'Live readings',
+                      style: MunjiText.label.copyWith(color: MunjiColors.blue),
+                    ),
+                  ),
+
                 if (_state.paired &&
                     widget.mode == DeviceScreenMode.settings &&
                     _state.phase != DevicePhase.connecting)
@@ -349,6 +364,17 @@ class _DeviceScreenState extends State<DeviceScreen> {
         ),
       ),
     );
+  }
+
+  void _openLiveReadings() {
+    final service = _service;
+    if (service is! RealMunjiDeviceService) return;
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => LiveReadingsScreen(
+        service: service,
+        isArabic: widget.isArabic,
+      ),
+    ));
   }
 
   void _showHelp(DS t) {
@@ -393,7 +419,10 @@ class _DeviceScreenState extends State<DeviceScreen> {
         ],
       ),
     );
-    if (ok == true) await _service.forget();
+    if (ok == true) {
+      await MunjiDevice.registry.markUnpaired();
+      await _service.forget();
+    }
   }
 }
 

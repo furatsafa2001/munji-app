@@ -2,15 +2,17 @@
   "name": "munji-backend",
   "version": "0.1.0",
   "private": true,
-  "description": "MUNJI backend \u2014 Firestore schema, security rules, emulator tooling",
+  "description": "MUNJI backend: Firestore and Storage rules, Cloud Functions, emulator tooling",
   "scripts": {
     "emu": "firebase emulators:start",
     "seed": "node seed/seed.js",
     "test": "jest --runInBand",
-    "test:rules": "firebase emulators:exec --only firestore \"jest --runInBand\"",
-    "deploy:rules": "firebase deploy --only firestore:rules,storage:rules",
+    "test:rules": "firebase emulators:exec --only auth,firestore,storage \"jest --runInBand\"",
+    "test:accounts": "jest tests/accounts.test.js --runInBand",
+    "test:functions": "npm --prefix functions test",
+    "deploy:rules": "firebase deploy --only firestore:rules,storage",
     "deploy:indexes": "firebase deploy --only firestore:indexes",
-    "test:accounts": "jest tests/accounts.test.js --runInBand"
+    "deploy:functions": "firebase deploy --only functions"
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^3.0.4",
@@ -19,5 +21,11 @@
   },
   "dependencies": {
     "firebase": "^10.12.0"
+  },
+  "jest": {
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "/functions/"
+    ]
   }
 }

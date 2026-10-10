@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
+import '../services/device_service.dart';
 import 'device_screen.dart';
 import 'profile_screen.dart';
 
@@ -29,6 +30,7 @@ class AuthGate extends StatelessWidget {
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
       stream: FirebaseFirestore.instance.collection('users').doc(uid).snapshots(),
       builder: (context, snap) {
+        // An error (rules, network) must not leave the user on a spinner.
         if (snap.hasError) {
           debugPrint('[authgate] error: ${snap.error}');
           return ProfileScreen(
@@ -44,8 +46,6 @@ class AuthGate extends StatelessWidget {
         }
 
         final data = snap.data!.data();
-        debugPrint('[authgate] exists=${snap.data!.exists} '
-            'role=${data?['role']} paired=${data?['devicePaired']}');
 
         // No profile document yet — let the profile screen surface the problem
         // and offer repair rather than trapping the user in a spinner.
@@ -58,6 +58,10 @@ class AuthGate extends StatelessWidget {
 
         final isPatient = data['role'] == 'patient';
         final paired = data['devicePaired'] == true;
+
+        // Only a patient's phone reports device status. start() is a no-op
+        // once running, so rebuilds of this stream do not restart it.
+        if (isPatient) MunjiDevice.registry.start();
 
         if (isPatient && !paired) {
           return DeviceScreen(

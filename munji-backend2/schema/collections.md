@@ -38,7 +38,6 @@ caregiver.
 | `knownConditions` | array\<string\> | no | client | |
 | `emergencyNumber` | string | yes | client | `911`. A field, not a constant, so it isn't hardcoded later |
 | `caregiverIds` | array\<string\> | yes | **server** | denormalised link — the whole rules model rests on this |
-| `activeDeviceId` | string | no | client | |
 
 ### `caregiver` map
 
@@ -99,51 +98,84 @@ The document is kept, never deleted — you want the history of who had access.
 
 ---
 
-## `devices/{patientUid}`
+## Patient data: `users/{patientId}/...`
 
-**The document ID is the patient's uid** — one device per patient, enforced
-by the database rather than by application code. Pairing a new device
-overwrites the old document, so two active devices for one patient cannot
-exist and no cleanup step can be forgotten.
+Everything about one patient lives under their user document, so access and
+account deletion work from one path. Full design and reasoning: the
+*MUNJI Storage Design* doc. Times are UTC; hour and day keys are Asia/Riyadh.
 
-The only collection besides `users` that the client writes, because the
-phone is what talks to the device over BLE.
+### `device/current`
+
+One document per patient. A new pairing overwrites it. Written by the app on
+every change of `connected`, `charging` or `worn`, plus a 5-minute heartbeat.
 
 | Field | Type | Required | Writer | Notes |
 |---|---|---|---|---|
-| `patientId` | string | yes | client, immutable | must equal the document ID |
-| `serial` | string | yes | client | changes when the patient pairs a different unit |
-| `model` | string | yes | client | `munji-v1` |
-| `firmware` | string | no | client | |
-| `pairedAt` | timestamp | yes | client | |
 | `status` | string | yes | client | `paired` \| `unpaired` |
-| `battery` | number | no | client | 0–100 |
-| `signalQuality` | string | no | client | `good` \| `weak` \| `leadoff` |
-| `lastSeenAt` | timestamp | no | client | |
+| `serial` | string | yes | client | from `0x2A25`, e.g. `MUNJI-3C84270B4F2A` |
+| `model` | string | yes | client | `munji-v1` |
+| `firmware` | string? | no | client | null until the firmware exposes `0x2A26` |
+| `pairedAt` | timestamp | yes | client | `request.time`; changes only with `serial` |
+| `connected` | bool | yes | client | phone connected to the patch now |
+| `charging` | bool? | no | client | null until the firmware sends it |
+| `worn` | bool? | no | client | null until lead-off is sent during streaming |
+| `battery` | int | yes | client | 0–100 |
+| `lastSeenAt` | timestamp | yes | client | must equal `request.time` |
 
----
+Caregiver app: `lastSeenAt` older than 15 minutes means "no recent data".
 
-## `recordings/{recordingId}`
+### `recordings/{recordingId}`
 
-Metadata for a one-time ECG capture. The waveform itself lives in Cloud
-Storage; this holds the pointer.
+Created by `onRecordingUploaded` only after the `.ecg` file passes
+validation. File: `patients/{patientId}/recordings/{recordingId}.ecg`
+(format in `functions/src/ecgFormat.js`).
 
-| Field | Type | Required | Writer | Notes |
-|---|---|---|---|---|
-| `patientId` | string | yes | server | |
-| `startedAt` | timestamp | yes | server | |
-| `durationSec` | number | yes | server | 30 \| 60 \| 180 |
-| `avgHr` | number | no | server | |
-| `resultClass` | string | no | server | filled once inference exists |
-| `resultTier` | string | no | server | `ok` \| `warn` \| `crit` \| `tech` |
-| `storagePath` | string | yes | server | `recordings/{patientId}/{id}.json.gz` |
-| `pdfPath` | string | no | server | |
-| `createdBy` | string | yes | server | uid |
-| `modelVersion` | string | no | server | traceability — which model produced the result |
+| Field | Type | Writer | Notes |
+|---|---|---|---|
+| `kind` | string | server | `manual` (30 s) \| `event` (60 s, month 3) |
+| `eventId` | string? | server | event strips only |
+| `startedAt` | timestamp | server | from the file header |
+| `durationSec` | number | server | 30 \| 60 |
+| `sampleRateHz` | number | server | 250 |
+| `uvPerLsb` | number | server | from the file header |
+| `storagePath` | string | server | |
+| `avgHr` | number? | server | from upload metadata |
+| `deviceSerial`, `firmware` | string? | server | traceability |
+| `resultCode`, `resultTier`, `modelVersion` | string? | server | null until inference |
+| `saved` | bool | **patient** | the only field a client may change |
+| `createdAt` | timestamp | server | |
 
-Written by the storage finalize trigger, **after** the upload completes. The
-client never creates the document, so a record can never exist without its
-data.
+Unsaved recordings are deleted 90 days after `createdAt` by
+`purgeRecordingsDaily`. Deleting the file deletes the document.
+
+### `events/{eventId}`
+
+Server only. Structure ready, used in month 3: `type`, `tier`
+(`warn`/`crit`/`tech`), `source` (`rule`/`model`), `startedAt`, `endedAt`,
+`hrAtEvent`, `modelVersion`, `recordingId`, `outcome { alertSentAt, ackAt,
+ackBy, escalatedAt }`.
+
+### `hourly/{yyyyMMddHH}`
+
+Written by the app once per finished hour, create only. TTL on `expireAt`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `hourStart` | timestamp | on the hour; id must be its Riyadh hour |
+| `dayKey` | string | first 8 characters of the id |
+| `hrAvg`, `hrMin`, `hrMax` | number? | 20–300, null when not monitored |
+| `hrvAvg` | number? | RMSSD; a device value of 0 is stored as null |
+| `qualityPct` | number? | null until the quality gate runs on the phone |
+| `monitoredMin`, `leadOffMin`, `chargingMin`, `disconnectedMin` | int | sum ≤ 60 |
+| `expireAt` | timestamp | exactly `hourStart` + 90 days |
+| `createdAt` | timestamp | `request.time` |
+
+### `daily/{yyyyMMdd}`
+
+Server only. `onHourlyCreated` rebuilds the vitals from all of the day's
+hours; recording triggers keep `recordingsCount`. Fields: `dayKey`, `date`,
+the hourly fields aggregated (HR weighted by `monitoredMin`),
+`hoursReported`, `recordingsCount`, `updatedAt`, `expireAt` (+2 years, TTL).
 
 ---
 
@@ -166,8 +198,7 @@ Actions: `link_created`, `link_revoked`, `device_paired`, `recording_created`,
 
 ---
 
-## Not built yet
+## Retired
 
-`events`, `medAlarms`, `vitalsDaily`, `alerts` — schema is in
-`MUNJI_Architecture.md`. Their deny-rules already ship, so none of them is
-world-writable the day it appears.
+Top-level `devices`, `events`, `recordings`, `vitalsDaily` and `alerts` are
+gone. The default deny rule covers them.

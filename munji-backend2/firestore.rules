@@ -1,10 +1,10 @@
 rules_version = '2';
 
-// MUNJI — Firestore security rules (week 1 baseline)
+// MUNJI — Firestore security rules (month 2: patient data under users/{uid})
 //
-// Principle: the client may READ what it owns or is linked to.
-// Anything that carries clinical or safety meaning is written by the
-// backend only, never by a client.
+// Principle: you read what is yours or what you are linked to, you write
+// your own settings and what your phone measures, and everything with
+// clinical meaning is written by the backend only.
 
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -33,9 +33,8 @@ service cloud.firestore {
       return signedIn() && uid() == patientId;
     }
 
-    // Revocation works by removing the uid from caregiverIds, so a revoked
-    // caregiver fails this check immediately — no rule needs to read the
-    // careLink's status. The link document is kept for history, not access.
+    // Revoking removes the uid from caregiverIds, so access ends on the
+    // next request for every path below at once.
     function isLinkedCaregiver(patientId) {
       return signedIn() && uid() in caregiversOf(patientId);
     }
@@ -44,9 +43,6 @@ service cloud.firestore {
       return isPatient(patientId) || isLinkedCaregiver(patientId);
     }
 
-    // Being linked IS the permission. A caregiver the patient has linked
-    // sees their data and manages their alarms — there are no per-feature
-    // toggles on top of the link.
     function canManageAlarms(patientId) {
       return canRead(patientId);
     }
@@ -54,6 +50,20 @@ service cloud.firestore {
     function unchanged(field) {
       return !(field in request.resource.data) ||
              request.resource.data[field] == resource.data[field];
+    }
+
+    // optional number: absent, null, or inside [lo, hi]
+    function optNum(d, k, lo, hi) {
+      return !(k in d) || d[k] == null || (d[k] is number && d[k] >= lo && d[k] <= hi);
+    }
+
+    // optional bool: absent, null, or a bool
+    function optBool(d, k) {
+      return !(k in d) || d[k] == null || d[k] is bool;
+    }
+
+    function minutes(v) {
+      return v is int && v >= 0 && v <= 60;
     }
 
     // ------------------------------------------------------------ users
@@ -71,8 +81,7 @@ service cloud.firestore {
                && d.createdAt is timestamp;
       }
 
-      // the care relationship must be identical before and after — only
-      // linkCode_redeem and link_revoke may change it
+      // only linkCode_redeem and link_revoke may change the relationship
       function linksUntouched() {
         return request.resource.data.get('patient', {}).get('caregiverIds', [])
                  == resource.data.get('patient', {}).get('caregiverIds', [])
@@ -82,8 +91,6 @@ service cloud.firestore {
 
       allow read: if isPatient(userId) || isLinkedCaregiver(userId);
 
-      // a user creates only their own profile, and cannot grant themselves
-      // a relationship — links are established server-side
       allow create: if signedIn()
                     && uid() == userId
                     && userShapeValid()
@@ -97,39 +104,133 @@ service cloud.firestore {
                     && unchanged('createdAt')
                     && linksUntouched();
 
-      allow delete: if false;
-    }
+      allow delete: if false;                // account deletion function only
 
-    // ---------------------------------------------------------- devices
+      // ----------------------------------------------- device/current
+      //
+      // One document per patient. A new pairing overwrites it, so two
+      // active devices for one patient cannot exist.
 
-    match /devices/{deviceId} {
+      match /device/{docId} {
 
-      function deviceShapeValid() {
-        let d = request.resource.data;
-        return d.patientId is string
-               && d.serial is string && d.serial.size() > 0
-               && d.model is string
-               && d.status in ['paired', 'unpaired']
-               && d.pairedAt is timestamp
-               && (!('battery' in d) || (d.battery is number && d.battery >= 0 && d.battery <= 100))
-               && (!('signalQuality' in d) || d.signalQuality in ['good', 'weak', 'leadoff']);
+        function deviceValid() {
+          let d = request.resource.data;
+          return docId == 'current'
+                 && d.keys().hasOnly(['status', 'serial', 'model', 'firmware', 'pairedAt',
+                                      'connected', 'charging', 'worn', 'battery', 'lastSeenAt'])
+                 && d.keys().hasAll(['status', 'serial', 'model', 'pairedAt',
+                                     'connected', 'battery', 'lastSeenAt'])
+                 && d.status in ['paired', 'unpaired']
+                 && d.serial is string && d.serial.size() > 0 && d.serial.size() <= 64
+                 && d.model is string && d.model.size() <= 32
+                 && (!('firmware' in d) || d.firmware == null
+                     || (d.firmware is string && d.firmware.size() <= 32))
+                 && d.pairedAt is timestamp
+                 && d.connected is bool
+                 && optBool(d, 'charging')
+                 && optBool(d, 'worn')
+                 && d.battery is int && d.battery >= 0 && d.battery <= 100
+                 && d.lastSeenAt == request.time;      // server clock, not the phone's
+        }
+
+        allow read: if canRead(userId);
+
+        allow create: if isPatient(userId)
+                      && deviceValid()
+                      && request.resource.data.pairedAt == request.time;
+
+        // pairedAt moves only when a different device is paired
+        allow update: if isPatient(userId)
+                      && deviceValid()
+                      && ((request.resource.data.serial == resource.data.serial
+                           && request.resource.data.pairedAt == resource.data.pairedAt)
+                          || (request.resource.data.serial != resource.data.serial
+                           && request.resource.data.pairedAt == request.time));
+
+        allow delete: if false;
       }
 
-      allow read: if canRead(resource.data.patientId);
+      // --------------------------------------------------- recordings
+      //
+      // Created by the storage finalize trigger after the file passes
+      // validation, so a record never exists without its data. The patient
+      // may only toggle `saved`; unsaved recordings expire after 90 days.
 
-      // One device per patient. The document ID is the patient's uid, so a
-      // second pairing overwrites the first instead of creating a rival
-      // stream — the database itself makes two active devices impossible.
-      allow create: if isPatient(request.resource.data.patientId)
-                    && deviceId == uid()
-                    && deviceShapeValid();
+      match /recordings/{recordingId} {
+        allow read: if canRead(userId);
 
-      allow update: if isPatient(resource.data.patientId)
-                    && deviceShapeValid()
-                    && unchanged('patientId')
-                    && unchanged('serial');
+        allow update: if isPatient(userId)
+                      && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['saved'])
+                      && request.resource.data.saved is bool;
 
-      allow delete: if false;
+        // deleting goes through the file: the patient deletes the .ecg and
+        // a trigger removes this document
+        allow create, delete: if false;
+      }
+
+      // ------------------------------------------------------- events
+      //
+      // A client that could write events could fabricate an emergency or
+      // hide a real one. Server only.
+
+      match /events/{eventId} {
+        allow read: if canRead(userId);
+        allow write: if false;
+      }
+
+      // ------------------------------------------------------- hourly
+      //
+      // Written by the phone once per finished hour. The id is the hour in
+      // Riyadh time (yyyyMMddHH), so the same hour cannot be uploaded twice.
+
+      match /hourly/{hourId} {
+
+        function hourValid() {
+          let d = request.resource.data;
+          let r = d.hourStart + duration.value(3, 'h');    // Asia/Riyadh, no DST
+          return hourId.matches('^[0-9]{10}$')
+                 && d.keys().hasOnly(['hourStart', 'dayKey', 'hrAvg', 'hrMin', 'hrMax',
+                                      'hrvAvg', 'qualityPct', 'monitoredMin', 'leadOffMin',
+                                      'chargingMin', 'disconnectedMin', 'expireAt', 'createdAt'])
+                 && d.keys().hasAll(['hourStart', 'dayKey', 'monitoredMin', 'leadOffMin',
+                                     'chargingMin', 'disconnectedMin', 'expireAt', 'createdAt'])
+                 && d.hourStart is timestamp
+                 && d.hourStart.minutes() == 0
+                 && d.hourStart.seconds() == 0
+                 && d.hourStart.nanos() == 0
+                 && int(hourId[0:4]) == r.year()
+                 && int(hourId[4:6]) == r.month()
+                 && int(hourId[6:8]) == r.day()
+                 && int(hourId[8:10]) == r.hours()
+                 && d.dayKey == hourId[0:8]
+                 && d.hourStart + duration.value(1, 'h') <= request.time     // hour finished
+                 && d.expireAt == d.hourStart + duration.value(90, 'd')
+                 && d.createdAt == request.time
+                 && optNum(d, 'hrAvg', 20, 300)
+                 && optNum(d, 'hrMin', 20, 300)
+                 && optNum(d, 'hrMax', 20, 300)
+                 && optNum(d, 'hrvAvg', 0, 2000)
+                 && optNum(d, 'qualityPct', 0, 100)
+                 && minutes(d.monitoredMin)
+                 && minutes(d.leadOffMin)
+                 && minutes(d.chargingMin)
+                 && minutes(d.disconnectedMin)
+                 && d.monitoredMin + d.leadOffMin + d.chargingMin + d.disconnectedMin <= 60;
+        }
+
+        allow read: if canRead(userId);
+        allow create: if isPatient(userId) && hourValid();
+        allow update, delete: if false;                  // TTL removes them
+      }
+
+      // -------------------------------------------------------- daily
+      //
+      // Recomputed by a trigger from the hourly documents.
+
+      match /daily/{dayId} {
+        allow read: if canRead(userId);
+        allow write: if false;
+      }
     }
 
     // -------------------------------------------------------- careLinks
@@ -146,35 +247,11 @@ service cloud.firestore {
       allow read, write: if false;           // six digits — never client-readable
     }
 
-    // ----------------------------------------------------------- events
-
-    match /events/{eventId} {
-      allow read: if canRead(resource.data.patientId);
-
-      // a client that can write events can fabricate a cardiac emergency,
-      // or suppress a real one. Classification originates server-side.
-      allow write: if false;
-    }
-
-    // ------------------------------------------------------- recordings
-
-    match /recordings/{recordingId} {
-      allow read: if canRead(resource.data.patientId);
-      allow write: if false;                 // written on storage finalize
-    }
-
-    // ----------------------------------------------------------- alerts
-
-    match /alerts/{alertId} {
-      allow read, write: if false;           // dispatcher only
-    }
-
     // -------------------------------------------------------- medAlarms
+    //
+    // Out of month 2 scope, unchanged. Document ID is
+    // {patientUid}_{normalisedMedName} so a medicine cannot be added twice.
 
-    // Document ID is {patientUid}_{normalisedMedName} — see medKey() in
-    // src/alarms.js. Two people adding the same medicine collide on the
-    // same ID instead of creating two reminders for one dose, which is how
-    // a patient ends up taking a double dose.
     match /medAlarms/{alarmId} {
 
       function medShapeValid() {
@@ -190,9 +267,6 @@ service cloud.firestore {
 
       allow read: if canRead(resource.data.patientId);
 
-      // create fails if the ID already exists, so a second person adding
-      // the same medicine is told it is already there rather than silently
-      // duplicating it
       allow create: if canManageAlarms(request.resource.data.patientId)
                     && medShapeValid()
                     && request.resource.data.createdBy == uid();
@@ -206,13 +280,6 @@ service cloud.firestore {
       allow delete: if canManageAlarms(resource.data.patientId);
     }
 
-    // ------------------------------------------------------ vitalsDaily
-
-    match /vitalsDaily/{docId} {
-      allow read: if canRead(resource.data.patientId);
-      allow write: if false;                 // scheduled rollup only
-    }
-
     // --------------------------------------------------------- auditLog
 
     match /auditLog/{logId} {
@@ -220,6 +287,9 @@ service cloud.firestore {
     }
 
     // ------------------------------------------------- deny by default
+    //
+    // Covers the retired top-level devices, events, recordings,
+    // vitalsDaily and alerts collections.
 
     match /{document=**} {
       allow read, write: if false;
