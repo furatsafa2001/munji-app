@@ -157,3 +157,47 @@ class CaptureBuffer {
     return EcgFile.build(samples: samples, startedAt: _startedAt!);
   }
 }
+
+/// A recording read back from its .ecg file.
+class EcgRecordingData {
+  const EcgRecordingData({
+    required this.startedAt,
+    required this.sampleRateHz,
+    required this.uvPerLsb,
+    required this.samples,
+  });
+
+  final DateTime startedAt;
+  final int sampleRateHz;
+  final double uvPerLsb;
+  final Int16List samples;
+
+  Duration get duration =>
+      Duration(milliseconds: samples.length * 1000 ~/ sampleRateHz);
+
+  double mvAt(int i) => samples[i] * uvPerLsb / 1000;
+
+  /// Parses bytes written by [EcgFile.build] (or the backend's
+  /// buildRecording). Returns null for anything that is not a valid file.
+  static EcgRecordingData? parse(Uint8List bytes) {
+    if (bytes.length < EcgFile.headerBytes) return null;
+    final d = ByteData.sublistView(bytes);
+    if (String.fromCharCodes(bytes.sublist(0, 4)) != 'MUNJ') return null;
+    if (d.getUint16(4, Endian.little) != EcgFile.version) return null;
+    final rate = d.getUint16(6, Endian.little);
+    final scale = d.getFloat32(8, Endian.little);
+    final count = d.getUint32(12, Endian.little);
+    final startMs = d.getInt64(16, Endian.little);
+    if (rate == 0 || bytes.length != EcgFile.headerBytes + count * 2) return null;
+    final samples = Int16List(count);
+    for (var i = 0; i < count; i++) {
+      samples[i] = d.getInt16(EcgFile.headerBytes + i * 2, Endian.little);
+    }
+    return EcgRecordingData(
+      startedAt: DateTime.fromMillisecondsSinceEpoch(startMs, isUtc: true),
+      sampleRateHz: rate,
+      uvPerLsb: scale,
+      samples: samples,
+    );
+  }
+}

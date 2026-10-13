@@ -10,7 +10,11 @@
 - `munji_app/test/ecg_capture_test.dart`
 
 ## الصفحة 2: السجل
-غير موجودة في هذا الملف (شغل فرات).
+- `munji_app/lib/screens/history_screen.dart` (القائمة، والتسجيل على ورق ECG)
+- `munji_app/lib/services/history_data.dart`
+- `munji_app/lib/services/recording_pdf.dart` (PDF للتسجيل الواحد)
+- `munji_app/lib/widgets/ecg_paper.dart`
+- يفتح من تبويب **القياس** (آخر التسجيلات + عرض السجل)
 
 ## الصفحة 3: الوصول للبيانات (الفلتر والرسوم)
 - `munji_app/lib/screens/reports_screen.dart`

@@ -9,6 +9,8 @@ import '../services/real_device_service.dart';
 import '../services/recording_service.dart';
 import '../theme/munji_theme.dart';
 import '../widgets/live_ecg_strip.dart';
+import '../services/history_data.dart';
+import 'history_screen.dart';
 
 /// The one-time 30-second ECG capture: the patient's real trace.
 ///
@@ -18,10 +20,15 @@ import '../widgets/live_ecg_strip.dart';
 /// 3 seconds, data stops arriving, or too many packets are lost. A trace
 /// with holes is worse than no trace, because someone may read it.
 class CaptureScreen extends StatefulWidget {
-  const CaptureScreen({super.key, required this.isArabic, RecordingService? recordings})
-      : _recordings = recordings;
+  const CaptureScreen({
+    super.key,
+    required this.isArabic,
+    this.fullName = '',
+    RecordingService? recordings,
+  }) : _recordings = recordings;
 
   final bool isArabic;
+  final String fullName;
   final RecordingService? _recordings;
 
   @override
@@ -35,6 +42,8 @@ class _CaptureScreenState extends State<CaptureScreen> {
   RealMunjiDeviceService? get _real =>
       _service is RealMunjiDeviceService ? _service : null;
   late final RecordingService _recordings = widget._recordings ?? RecordingService();
+  final _history = HistoryRepository();
+  late final Stream<List<Recording>> _latest = _history.latest();
 
   late DeviceState _state = _service.state;
   StreamSubscription<DeviceState>? _stateSub;
@@ -229,12 +238,59 @@ class _CaptureScreenState extends State<CaptureScreen> {
               _Phase.done => _done(),
               _Phase.failed => _failed(),
             },
+            if (_phase == _Phase.ready || _phase == _Phase.done) _recent(),
             const SizedBox(height: MunjiSpace.lg),
             Text(t.disclaimer,
                 style: MunjiText.small.copyWith(fontSize: 11.5)),
           ],
         ),
       ),
+    );
+  }
+
+  void _openHistory() => Navigator.of(context).push(MaterialPageRoute<void>(
+        builder: (_) => HistoryScreen(isArabic: widget.isArabic, fullName: widget.fullName),
+      ));
+
+  /// The last three recordings, and the way into the full history.
+  Widget _recent() {
+    return StreamBuilder<List<Recording>>(
+      stream: _latest,
+      builder: (context, snap) {
+        final list = snap.data ?? const <Recording>[];
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const SizedBox(height: MunjiSpace.xl),
+            Row(
+              children: [
+                Expanded(child: Text(t.recent, style: MunjiText.h3)),
+                TextButton(onPressed: _openHistory, child: Text(t.seeAll)),
+              ],
+            ),
+            const SizedBox(height: MunjiSpace.xs),
+            if (snap.hasData && list.isEmpty)
+              Text(t.noRecordings, style: MunjiText.small)
+            else
+              for (final r in list) ...[
+                RecordingTile(
+                  recording: r,
+                  isArabic: widget.isArabic,
+                  showDay: true,
+                  onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(
+                    builder: (_) => RecordingScreen(
+                      recording: r,
+                      isArabic: widget.isArabic,
+                      fullName: widget.fullName,
+                      repository: _history,
+                    ),
+                  )),
+                ),
+                const SizedBox(height: MunjiSpace.sm),
+              ],
+          ],
+        );
+      },
     );
   }
 
@@ -576,6 +632,9 @@ class _T {
   String get avgHr => ar ? 'متوسط النبض' : 'Avg heart rate';
   String get time => ar ? 'الوقت' : 'Time';
   String get again => ar ? 'تسجيل جديد' : 'New recording';
+  String get recent => ar ? 'آخر التسجيلات' : 'Recent recordings';
+  String get seeAll => ar ? 'عرض السجل' : 'See all';
+  String get noRecordings => ar ? 'لا توجد تسجيلات بعد.' : 'No recordings yet.';
 
   String get resend => ar ? 'إعادة الرفع' : 'Upload again';
   String get discard => ar ? 'تجاهل وسجّل من جديد' : 'Discard and record again';

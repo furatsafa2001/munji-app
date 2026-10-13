@@ -65,7 +65,7 @@ async function main() {
     fcmTokens: [],
     createdAt: now(),
     disabled: false,
-    devicePaired: true,
+    devicePaired: true,       // skips the mandatory pairing screen
     patient: {
       dob: admin.firestore.Timestamp.fromDate(new Date('1958-04-12')),
       sex: 'female',
@@ -84,7 +84,7 @@ async function main() {
     fcmTokens: [],
     createdAt: now(),
     disabled: false,
-    devicePaired: true,
+    devicePaired: true,       // skips the mandatory pairing screen
     patient: {
       dob: admin.firestore.Timestamp.fromDate(new Date('1952-09-03')),
       sex: 'male',
@@ -123,6 +123,8 @@ async function main() {
   // show a gap, not draw a line through it.
   const SEED_DAYS = 14;
   const emptyDays = new Set([5, 9]);
+  // within the last 7 days: the upload trigger refuses older start times
+  const RECORDING_DAYS = new Set([1, 3, 6]);
   const wave = (d, h) => Math.sin((d * 24 + h) / 5);
   let hourlyCount = 0;
   for (let back = SEED_DAYS; back >= 1; back--) {
@@ -162,7 +164,7 @@ async function main() {
         dayKey: key,
         date: Timestamp.fromMillis(start0),
         ...computeDailyVitals(hours),
-        recordingsCount: back % 3 === 0 ? 1 : 0,
+        recordingsCount: RECORDING_DAYS.has(back) ? 1 : 0,
         expireAt: Timestamp.fromMillis(start0 + 730 * DAY_MS),
         updatedAt: now()
       });
@@ -225,21 +227,80 @@ async function main() {
 
   await batch.commit();
 
-  // --------------------------------------------------------- recording
-  // Uploaded as a real file. With the functions emulator running, the
-  // finalize trigger validates it and creates users/{safa}/recordings/...
-  const samples = Array.from({ length: 7500 }, (_, i) =>
-    Math.round(600 * Math.exp(-(((i % 208) - 40) ** 2) / 20)));    // ~72 bpm spikes
+  // -------------------------------------------------------- recordings
+  // Real .ecg files with a synthetic but realistic single-lead trace
+  // (P, QRS, T, a little baseline wander and noise), so the history screen
+  // and its PDF can be tried without a patch. The document is written
+  // first: if the functions emulator is running, its trigger validates the
+  // file and finds the document already there, which it treats as done.
+  const UV_PER_LSB = 1.5258789;
+  function synthEcg(bpm, seed) {
+    let x = seed;
+    const rand = () => ((x = (x * 9301 + 49297) % 233280) / 233280);
+    const fs = 250, n = 30 * fs, mv = new Float64Array(n);
+    const waves = [ // [offset s, amplitude mV, width s]
+      [-0.20, 0.12, 0.025], [-0.045, -0.10, 0.010], [0, 1.05, 0.011],
+      [0.04, -0.28, 0.012], [0.26, 0.30, 0.045]
+    ];
+    let t = 0.5;
+    while (t < 30.5) {
+      for (const [off, amp, w] of waves) {
+        const c = t + off;
+        const from = Math.max(0, Math.floor((c - 5 * w) * fs));
+        const to = Math.min(n, Math.ceil((c + 5 * w) * fs));
+        for (let i = from; i < to; i++) mv[i] += amp * Math.exp(-(((i / fs - c) / w) ** 2) / 2);
+      }
+      t += (60 / bpm) * (0.96 + 0.08 * rand());
+    }
+    const out = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const wander = 0.06 * Math.sin(2 * Math.PI * 0.25 * i / fs);
+      const noise = (rand() - 0.5) * 0.03;
+      out[i] = Math.round(((mv[i] + wander + noise) * 1000) / UV_PER_LSB);
+    }
+    return out;
+  }
+
+  const recs = [
+    { id: 'rec_seed_today01', back: 0, minutesAgo: 25, bpm: 74, saved: false },
+    { id: 'rec_seed_day1_01', back: 1, hour: 9, bpm: 68, saved: true },
+    { id: 'rec_seed_day3_01', back: 3, hour: 18, bpm: 88, saved: false },
+    { id: 'rec_seed_day6_01', back: 6, hour: 21, bpm: 63, saved: false }
+  ];
   let recordingNote = 'skipped (storage emulator not running)';
   try {
-    await admin.storage().bucket().file(`patients/${SAFA}/recordings/rec_seed_0001.ecg`).save(
-      buildRecording({ samples, startedAtMs: Date.now() - 10 * 60 * 1000 }),
-      {
-        contentType: 'application/octet-stream',
-        metadata: { metadata: { kind: 'manual', avgHr: '72', deviceSerial: 'MUNJI-3C84270B4F2A' } }
-      }
-    );
-    recordingNote = 'uploaded, the trigger creates its document';
+    const bucket = admin.storage().bucket();
+    for (const [i, r] of recs.entries()) {
+      const startedAtMs = r.back === 0
+        ? Date.now() - r.minutesAgo * 60 * 1000
+        : dayStartMs(dayKey(Date.now() - r.back * DAY_MS)) + r.hour * HOUR_MS;
+      const path = `patients/${SAFA}/recordings/${r.id}.ecg`;
+      await db.doc(`users/${SAFA}/recordings/${r.id}`).set({
+        kind: 'manual',
+        eventId: null,
+        startedAt: Timestamp.fromMillis(startedAtMs),
+        durationSec: 30,
+        sampleRateHz: 250,
+        uvPerLsb: UV_PER_LSB,
+        storagePath: path,
+        avgHr: r.bpm,
+        deviceSerial: 'MUNJI-3C84270B4F2A',
+        firmware: null,
+        resultCode: null,
+        resultTier: null,
+        modelVersion: null,
+        saved: r.saved,
+        createdAt: now()
+      });
+      await bucket.file(path).save(
+        buildRecording({ samples: synthEcg(r.bpm, 17 + i), startedAtMs }),
+        {
+          contentType: 'application/octet-stream',
+          metadata: { metadata: { kind: 'manual', avgHr: String(r.bpm), deviceSerial: 'MUNJI-3C84270B4F2A' } }
+        }
+      );
+    }
+    recordingNote = `${recs.length} with files (today, 1, 3 and 6 days ago)`;
   } catch (e) {
     // storage emulator not started; the rest of the seed is still usable
   }
@@ -250,10 +311,10 @@ async function main() {
   console.log(`  hourly           ${hourlyCount}   safa, last 14 days 07:00-23:00 (two days empty)`);
   console.log('  daily             12   safa, last 14 days');
   console.log('  careLinks          2   both patients linked to nora');
-  console.log('  linkCodes          1   482913, expires in 15 min');
+  console.log('  linkCodes          1   482913, expires in 10 min');
   console.log('  medAlarms          3   one added by the caregiver');
   console.log('  auditLog           1   log_seed_1');
-  console.log(`  recording          1   ${recordingNote}`);
+  console.log(`  recordings        4   ${recordingNote}`);
   console.log('passwords: Test1234!');
 }
 

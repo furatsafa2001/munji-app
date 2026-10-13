@@ -50,6 +50,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
   }
 
   void _load() {
+    // block body: an arrow here would hand setState the Future it assigns
     setState(() {
       _future = _fetch();
     });

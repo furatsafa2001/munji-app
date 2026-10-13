@@ -99,6 +99,25 @@ void main() {
     expect(b.avgHr, 75);
   });
 
+  test('a file reads back exactly as written (history screen)', () {
+    final b = fullBuffer();
+    final data = EcgRecordingData.parse(b.toFile())!;
+    expect(data.samples.length, 7500);
+    expect(data.sampleRateHz, 250);
+    expect(data.samples[0], b.samples[0]);
+    expect(data.samples[7499], b.samples[7499]);
+    expect(data.startedAt.millisecondsSinceEpoch, b.startedAt!.millisecondsSinceEpoch);
+    expect(data.duration, const Duration(seconds: 30));
+  });
+
+  test('anything that is not a recording is refused', () {
+    expect(EcgRecordingData.parse(Uint8List(10)), isNull);
+    final bytes = fullBuffer().toFile();
+    expect(EcgRecordingData.parse(Uint8List.sublistView(bytes, 0, bytes.length - 2)), isNull);
+    final bad = Uint8List.fromList(bytes)..[0] = 0x58;
+    expect(EcgRecordingData.parse(bad), isNull);
+  });
+
   test('the countdown starts at 30 and ends at 0', () {
     final b = CaptureBuffer();
     expect(b.secondsLeft, 30);

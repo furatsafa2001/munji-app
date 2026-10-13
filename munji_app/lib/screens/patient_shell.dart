@@ -54,7 +54,7 @@ class _PatientShellState extends State<PatientShell> {
             onOpenCapture: () => setState(() => _index = 2),
           ),
           ReportsScreen(isArabic: ar, fullName: widget.fullName),
-          CaptureScreen(isArabic: ar),
+          CaptureScreen(isArabic: ar, fullName: widget.fullName),
           _Soon(isArabic: ar, title: tabs[3].label, icon: tabs[3].icon),
           ProfileScreen(
             isArabic: ar,

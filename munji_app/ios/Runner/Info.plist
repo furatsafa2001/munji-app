@@ -26,6 +26,13 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>يستخدم منجي الشبكة المحلية للاتصال بخادم التطوير أثناء الاختبار.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>يستخدم منجي البلوتوث للاتصال بجهاز مراقبة القلب.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
