@@ -40,13 +40,19 @@ class _ReportsScreenState extends State<ReportsScreen> {
   @override
   void initState() {
     super.initState();
-    _load();
+    _future = _fetch();
+  }
+
+  Future<ReportSummary>? _fetch() {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return null;
+    return widget.repository.load(uid, _period);
   }
 
   void _load() {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
-    if (uid == null) return;
-    setState(() => _future = widget.repository.load(uid, _period));
+    setState(() {
+      _future = _fetch();
+    });
   }
 
   Future<void> _pick(ReportRange r) async {

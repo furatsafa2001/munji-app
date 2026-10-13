@@ -65,6 +65,7 @@ async function main() {
     fcmTokens: [],
     createdAt: now(),
     disabled: false,
+    devicePaired: true,
     patient: {
       dob: admin.firestore.Timestamp.fromDate(new Date('1958-04-12')),
       sex: 'female',
@@ -83,6 +84,7 @@ async function main() {
     fcmTokens: [],
     createdAt: now(),
     disabled: false,
+    devicePaired: true,
     patient: {
       dob: admin.firestore.Timestamp.fromDate(new Date('1952-09-03')),
       sex: 'male',
