@@ -55,6 +55,16 @@ class DeviceConfig {
   /// last value.
   static const Duration heartStaleAfter = Duration(seconds: 5);
 
+  /// How long after connecting before HRV is shown. The firmware computes
+  /// RMSSD over its own short window and the first values after a link
+  /// comes up are dominated by noise.
+  static const Duration hrvWarmUp = Duration(minutes: 1);
+
+  /// How often the patient's phone publishes the latest heart rate and HRV
+  /// to `device/current` while the patch is connected. This is what the
+  /// caregiver sees, so it bounds how stale their view can be.
+  static const Duration liveWriteEvery = Duration(minutes: 1);
+
   // ── 3. Standard BLE services ─────────────────────────────────────────────
 
   /// Battery Service 0x180F → Battery Level 0x2A19.

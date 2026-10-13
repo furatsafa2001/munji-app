@@ -4,12 +4,15 @@ import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:cloud_functions/cloud_functions.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'firebase_options.dart';
 import 'theme/munji_theme.dart';
 import 'services/device_config.dart';
+import 'services/link_service.dart';
 import 'services/device_service.dart';
 import 'services/real_device_service.dart';
 import 'screens/sign_in_screen.dart';
@@ -40,6 +43,9 @@ void main() async {
     debugPrint('[munji] using emulator at $emulatorHost');
     await FirebaseAuth.instance.useAuthEmulator(emulatorHost, 9099);
     FirebaseFirestore.instance.useFirestoreEmulator(emulatorHost, 8080);
+    FirebaseFunctions.instanceFor(region: LinkService.region)
+        .useFunctionsEmulator(emulatorHost, 5001);
+    await FirebaseStorage.instance.useStorageEmulator(emulatorHost, 9199);
   }
 
   // The real patch over BLE. Without this line the app silently runs on the
@@ -98,6 +104,7 @@ class _MunjiAppState extends State<MunjiApp> {
 
           if (user == null) {
             // nobody to report device status for
+            MunjiDevice.hourly.stop();
             MunjiDevice.registry.stop();
             return SignInScreen(
               isArabic: _isArabic,

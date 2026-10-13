@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 
+import 'device_config.dart';
 import 'device_service.dart';
 import 'real_device_service.dart';
 
@@ -16,9 +17,15 @@ import 'real_device_service.dart';
 ///
 /// Writes, matching firestore.rules:
 ///   * immediately when `connected` or `worn` changes
-///   * a heartbeat every 5 minutes otherwise, connected or not, so a stale
-///     `lastSeenAt` means the phone itself has gone quiet
+///   * every minute while connected, carrying the latest `hr` and `rmssd`,
+///     which is what the caregiver's home screen shows
+///   * every 5 minutes while not connected, so a stale `lastSeenAt` means
+///     the phone itself has gone quiet
 ///   * always the whole document, with `lastSeenAt` as a server timestamp
+///
+/// `hr` and `rmssd` are null whenever there is no fresh value: no beat in
+/// the last few seconds, or HRV still settling after a reconnect. A
+/// caregiver must never see an old number presented as current.
 class DeviceRegistry {
   DeviceRegistry({
     required MunjiDeviceService service,
@@ -34,7 +41,8 @@ class DeviceRegistry {
 
   StreamSubscription<DeviceState>? _sub;
   StreamSubscription<LeadStatus>? _leadSub;
-  Timer? _heartbeat;
+  Timer? _ticker;
+  DateTime? _lastWriteAt;
 
   bool? _lastConnected;
   bool? _lastWorn;
@@ -55,6 +63,10 @@ class DeviceRegistry {
 
   bool get isRunning => _sub != null;
 
+  /// Whether this patient has a patch on record (from Firestore or a
+  /// pairing in this session).
+  bool get isPaired => _paired;
+
   String? get _uid => _auth.currentUser?.uid;
 
   DocumentReference<Map<String, dynamic>> _ref(String uid) =>
@@ -73,9 +85,7 @@ class DeviceRegistry {
     if (s is RealMunjiDeviceService) {
       _leadSub = s.leadStream.listen((_) => _onWornMaybeChanged());
     }
-    _heartbeat = Timer.periodic(heartbeat, (_) {
-      if (_paired) _write();
-    });
+    _ticker = Timer.periodic(DeviceConfig.liveWriteEvery, (_) => _tick());
 
     // the link may already be up when the patient lands on the home screen
     await _onStateChange(_service.state);
@@ -84,10 +94,11 @@ class DeviceRegistry {
   void stop() {
     _sub?.cancel();
     _leadSub?.cancel();
-    _heartbeat?.cancel();
+    _ticker?.cancel();
     _sub = null;
     _leadSub = null;
-    _heartbeat = null;
+    _ticker = null;
+    _lastWriteAt = null;
     _lastConnected = null;
     _lastWorn = null;
     _paired = false;
@@ -109,6 +120,19 @@ class DeviceRegistry {
       _loaded = true;
     } on FirebaseException catch (e) {
       debugPrint('[registry] read failed: ${e.code}');
+    }
+  }
+
+  /// Once a minute: publish while connected, otherwise only keep the
+  /// 5-minute heartbeat going.
+  void _tick() {
+    if (!_paired) return;
+    final connected = _service.state.phase == DevicePhase.connected;
+    final last = _lastWriteAt;
+    if (connected ||
+        last == null ||
+        DateTime.now().difference(last) >= heartbeat) {
+      _write();
     }
   }
 
@@ -164,11 +188,14 @@ class DeviceRegistry {
       'charging': null, // firmware does not report it yet
       'worn': _worn(),
       'battery': battery.clamp(0, 100),
+      'hr': _hr(),
+      'rmssd': _rmssd(),
       'lastSeenAt': FieldValue.serverTimestamp(),
     };
 
     try {
       await _ref(uid).set(doc);
+      _lastWriteAt = DateTime.now();
       if (!samePairing) {
         // read back the server's pairedAt so later writes can repeat it
         final snap = await _ref(uid).get();
@@ -208,6 +235,26 @@ class DeviceRegistry {
       return f.length > 32 ? f.substring(0, 32) : f;
     }
     return 'simulated';
+  }
+
+  /// Latest heart rate, one decimal, or null when no beat is recent.
+  double? _hr() {
+    final s = _service;
+    if (s is! RealMunjiDeviceService) return null;
+    if (s.state.phase != DevicePhase.connected) return null;
+    final bpm = s.heart?.bpm;
+    if (bpm == null || bpm < 20 || bpm > 300) return null;
+    return (bpm * 10).round() / 10;
+  }
+
+  /// RMSSD once it has settled, one decimal, otherwise null.
+  double? _rmssd() {
+    final s = _service;
+    if (s is! RealMunjiDeviceService) return null;
+    if (s.state.phase != DevicePhase.connected) return null;
+    final r = s.settledRmssd;
+    if (r == null || r > 1000) return null;
+    return (r * 10).round() / 10;
   }
 
   /// True or false only from a recent lead check, otherwise null (unknown).

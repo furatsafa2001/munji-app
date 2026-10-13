@@ -133,6 +133,25 @@ class RealMunjiDeviceService implements MunjiDeviceService {
   int _packetsReceived = 0;
   int get packetsReceived => _packetsReceived;
 
+  DateTime? _connectedAt;
+
+  /// When the current link came up, or null while not connected. The
+  /// firmware's RMSSD swings wildly for the first minute of a link (457 ms
+  /// was seen in testing), so screens wait [DeviceConfig.hrvWarmUp] after
+  /// this before showing it.
+  DateTime? get connectedAt => _connectedAt;
+
+  /// The firmware's RMSSD, or null while it is still settling or no beat
+  /// is recent. The one place that decides whether HRV is fit to show.
+  double? get settledRmssd {
+    final at = _connectedAt;
+    final h = heart;
+    if (at == null || h == null) return null;
+    if (DateTime.now().difference(at) < DeviceConfig.hrvWarmUp) return null;
+    final r = h.rmssdMs;
+    return (r == null || r <= 0) ? null : r;
+  }
+
   DateTime? _batteryAt;
 
   /// When the battery level last arrived. Null until the first one.
@@ -411,6 +430,7 @@ class RealMunjiDeviceService implements MunjiDeviceService {
       _connSub = device.connectionState.listen((s) {
         if (s == BluetoothConnectionState.disconnected) {
           debugPrint('[ble] disconnected — retrying');
+          _connectedAt = null;
           _emit(_state.copyWith(phase: DevicePhase.reconnecting));
           Future.delayed(const Duration(seconds: 3), () {
             if (_state.phase == DevicePhase.reconnecting) connect();
@@ -420,6 +440,7 @@ class RealMunjiDeviceService implements MunjiDeviceService {
 
       await _discoverAndSubscribe(device);
 
+      _connectedAt = DateTime.now();
       _emit(_state.copyWith(
         phase: DevicePhase.connected,
         paired: true,
@@ -595,6 +616,7 @@ class RealMunjiDeviceService implements MunjiDeviceService {
     _lastSequence = null;
     _droppedPackets = 0;
     _packetsReceived = 0;
+    _connectedAt = null;
     _batteryAt = null;
     _lastLeads = null;
     _lastHeart = null;

@@ -4,7 +4,11 @@
 
 1. In `munji-backend2`: `npm run emu` (leave it running)
 2. Once, after the emulator starts: `npm run seed`
-3. Here: `./scripts/run_emulator.sh`
+3. Here: `./scripts/run_emulator.sh` (macOS) or `.\scripts\run_emulator.ps1` (Windows)
+
+Linking (patient to caregiver) runs on Cloud Functions, which are only in
+the emulator until CNTXT billing is set up for me-central2. In a release
+build the linking screens show "not available right now".
 
 Phone and Mac must be on the same Wi-Fi. Test account: `safa.khan@email.com` / `Test1234!`
 

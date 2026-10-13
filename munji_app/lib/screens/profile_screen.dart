@@ -6,6 +6,7 @@ import '../services/account_service.dart';
 import '../theme/munji_theme.dart';
 import '../widgets/munji_widgets.dart';
 import '../l10n/device_strings.dart';
+import 'caregivers_screen.dart';
 import 'device_screen.dart';
 import 'sign_in_screen.dart';
 
@@ -260,8 +261,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       },
                     ),
                   ),
-                  const SizedBox(height: MunjiSpace.sm),
-                  MunjiRow(
+                  if (isPatient) const SizedBox(height: MunjiSpace.sm),
+                  if (isPatient) MunjiRow(
                     icon: Icons.bluetooth,
                     title: DS(widget.isArabic).munjiDevice,
                     subtitle: DS(widget.isArabic).device,
@@ -274,6 +275,22 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       ),
                     ),
                   ),
+                  if (isPatient) ...[
+                    const SizedBox(height: MunjiSpace.sm),
+                    MunjiRow(
+                      icon: Icons.group_outlined,
+                      title: widget.isArabic ? 'المرافقون' : 'My caregivers',
+                      subtitle: widget.isArabic
+                          ? 'من يتابع حالتك'
+                          : 'Who follows your heart data',
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) =>
+                              CaregiversScreen(isArabic: widget.isArabic),
+                        ),
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 26),
                   MunjiRow(
                     icon: Icons.logout,

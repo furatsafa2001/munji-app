@@ -40,7 +40,10 @@ ahmed.khan@email.com   patient    linked to Nora, device dev_7B11
 nora.khan@email.com    caregiver  linked to both
 ```
 
-Live pairing code: `482913`, expires 15 minutes after seeding.
+Live link code: `482913` (for Safa), expires 10 minutes after seeding.
+Nora is already linked to Safa, so to try redeeming it, sign up a new
+caregiver account in the app and enter the code. Seeded accounts start
+with their email verified.
 
 ---
 
@@ -88,6 +91,9 @@ today and closes a hole you'd never think to look for.
 | `onRecordingDeleted` | Storage delete | removes the document |
 | `purgeRecordingsDaily` | 03:00 Riyadh | deletes unsaved recordings after 90 days |
 | `onHourlyCreated` | Firestore create | rebuilds `users/{uid}/daily/{day}` |
+| `linkCodeGenerate` | callable | patient gets a 6-digit code, valid 10 minutes; retires any earlier one |
+| `linkCodeRedeem` | callable | caregiver redeems it; 5 wrong codes per 15 minutes per caregiver |
+| `linkRevoke` | callable | either side ends a link |
 
 All run in `me-central2`. The bucket name comes from `functions/.env`
 (`ECG_BUCKET`), and the app must use the same bucket.
@@ -95,6 +101,7 @@ All run in `me-central2`. The bucket name comes from `functions/.env`
 ```bash
 npm --prefix functions install
 npm run test:functions     # unit tests, no emulator needed
+npm run test:links         # linking against the Firestore emulator
 npm run emu                # now also starts functions + storage
 npm run seed               # uploads a sample recording; the trigger validates it
 ```

@@ -5,7 +5,8 @@
   "main": "index.js",
   "engines": { "node": "22" },
   "scripts": {
-    "test": "jest"
+    "test": "jest --testPathIgnorePatterns emu",
+    "test:links": "jest test/links.emu.test.js --runInBand"
   },
   "dependencies": {
     "firebase-admin": "^12.7.0",

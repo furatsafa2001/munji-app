@@ -12,7 +12,8 @@ const fs = require('fs');
 const { initializeTestEnvironment, assertFails, assertSucceeds } =
   require('@firebase/rules-unit-testing');
 const {
-  doc, getDoc, setDoc, updateDoc, deleteDoc, serverTimestamp, Timestamp
+  doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, serverTimestamp, Timestamp,
+  collection, query, where
 } = require('firebase/firestore');
 const { hourKey } = require('../functions/src/riyadh');
 
@@ -312,7 +313,26 @@ test('lastSeenAt from the phone clock is rejected', async () => {
 });
 
 test('unknown fields on the device are rejected', async () => {
-  await assertFails(setDoc(deviceRef(SAFA), deviceUpdate({ hr: 72 })));
+  await assertFails(setDoc(deviceRef(SAFA), deviceUpdate({ spo2: 98 })));
+});
+
+test('latest heart rate and HRV are accepted', async () => {
+  await assertSucceeds(setDoc(deviceRef(SAFA), deviceUpdate({ hr: 72.4, rmssd: 32.1 })));
+});
+
+test('heart rate and HRV may be null when there is no fresh reading', async () => {
+  await assertSucceeds(setDoc(deviceRef(SAFA), deviceUpdate({ hr: null, rmssd: null })));
+});
+
+test('heart rate outside 20-300 is rejected', async () => {
+  await assertFails(setDoc(deviceRef(SAFA), deviceUpdate({ hr: 15 })));
+  await assertFails(setDoc(deviceRef(SAFA), deviceUpdate({ hr: 301 })));
+});
+
+test('HRV outside 0-1000 or not a number is rejected', async () => {
+  await assertFails(setDoc(deviceRef(SAFA), deviceUpdate({ rmssd: -1 })));
+  await assertFails(setDoc(deviceRef(SAFA), deviceUpdate({ rmssd: 1001 })));
+  await assertFails(setDoc(deviceRef(SAFA), deviceUpdate({ rmssd: '32' })));
 });
 
 test('only the document id "current" is allowed', async () => {
@@ -467,6 +487,26 @@ test('the old top-level collections are closed', async () => {
 test('either party reads their care link', async () => {
   await assertSucceeds(getDoc(doc(as(SAFA), 'careLinks', `${SAFA}_${NORA}`)));
   await assertSucceeds(getDoc(doc(as(NORA), 'careLinks', `${SAFA}_${NORA}`)));
+});
+
+test('the app lists links with the queries it actually uses', async () => {
+  // patient side: my caregivers
+  await assertSucceeds(getDocs(query(collection(as(SAFA), 'careLinks'),
+    where('patientId', '==', SAFA), where('status', '==', 'active'))));
+  // caregiver side: my patients
+  await assertSucceeds(getDocs(query(collection(as(NORA), 'careLinks'),
+    where('caregiverId', '==', NORA), where('status', '==', 'active'))));
+});
+
+test('nobody can list someone else\'s links', async () => {
+  await assertFails(getDocs(query(collection(as(STRANGER), 'careLinks'),
+    where('patientId', '==', SAFA))));
+  await assertFails(getDocs(collection(as(NORA), 'careLinks')));
+});
+
+test('the redemption counter is server only', async () => {
+  await assertFails(getDoc(doc(as(NORA), 'linkAttempts', NORA)));
+  await assertFails(setDoc(doc(as(NORA), 'linkAttempts', NORA), { count: 0, windowStart: 0 }));
 });
 
 test('nobody can create a care link from the client', async () => {

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'device_registry.dart';
+import 'hourly_recorder.dart';
 
 /// MUNJI device connection.
 ///
@@ -269,9 +270,17 @@ class MunjiDevice {
   static DeviceRegistry get registry =>
       _registry ??= DeviceRegistry(service: instance);
 
+  static HourlyRecorder? _hourly;
+
+  /// Writes the hourly summaries that reports are built from.
+  static HourlyRecorder get hourly =>
+      _hourly ??= HourlyRecorder(service: instance, registry: registry);
+
   /// Swap in the real BLE implementation here once the firmware exists.
   static void use(MunjiDeviceService service) {
     _instance?.dispose();
+    _hourly?.stop();
+    _hourly = null;
     _registry?.stop();
     _registry = null;
     _instance = service;

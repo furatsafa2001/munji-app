@@ -61,13 +61,19 @@ at any privilege level.
 |---|---|---|---|---|
 | `patientId` | string | yes | server | |
 | `createdAt` | timestamp | yes | server | |
-| `expiresAt` | timestamp | yes | server | 15 minutes |
-| `used` | bool | yes | server | single use |
-| `attempts` | number | yes | server | lock at 5 |
+| `expiresAt` | timestamp | yes | server | 10 minutes, as in the design |
+| `used` | bool | yes | server | single use; also set when a newer code replaces it |
+| `attempts` | number | yes | server | kept for compatibility, not used for limiting |
 
 Six digits is one million combinations. If a client could query this
 collection the code space would be exhaustible in minutes, so redemption
-happens server-side with attempt limits — never by reading the document.
+happens server-side (`linkCodeRedeem`), never by reading the document.
+
+Limiting is per caregiver, in `linkAttempts/{caregiverId}`
+(`windowStart`, `count`): five wrong codes in 15 minutes and that account
+cannot redeem until the window passes. A counter on the code itself would
+never trip, because someone guessing tries a different code each time.
+A patient has at most one live code; asking for a new one retires the old.
 
 ---
 
@@ -80,13 +86,16 @@ to check permissions, instead of running a query — rules cannot query cheaply.
 |---|---|---|---|---|
 | `patientId` | string | yes | server, immutable | |
 | `caregiverId` | string | yes | server, immutable | |
-| `relation` | string | no | server | `daughter`, `son`, `spouse`, … |
+| `patientName` | string | yes | server | snapshot at link time, so the caregiver's list needs no extra read |
+| `caregiverName` | string | yes | server | snapshot; patients cannot read caregiver profiles |
+| `relation` | string? | no | server | `son` `daughter` `spouse` `sibling` `parent` `friend` `other`, chosen by the caregiver |
 | `status` | string | yes | server | `pending` \| `active` \| `revoked` |
 | `priority` | number | yes | server | 1 = primary, 2 = backup |
 
 | `createdAt` | timestamp | yes | server | |
 | `activatedAt` | timestamp | no | server | |
-| `revokedAt` | timestamp | no | server | |
+| `revokedAt` | timestamp? | no | server | |
+| `revokedBy` | string | no | server | uid of whoever ended it |
 
 There is no `permissions` map. Being linked is the permission: a linked
 caregiver sees the patient's data and manages their alarms. Per-feature
@@ -107,7 +116,8 @@ account deletion work from one path. Full design and reasoning: the
 ### `device/current`
 
 One document per patient. A new pairing overwrites it. Written by the app on
-every change of `connected`, `charging` or `worn`, plus a 5-minute heartbeat.
+every change of `connected`, `charging` or `worn`, every minute while
+connected (carrying `hr` and `rmssd`), and a 5-minute heartbeat otherwise.
 
 | Field | Type | Required | Writer | Notes |
 |---|---|---|---|---|
@@ -120,9 +130,13 @@ every change of `connected`, `charging` or `worn`, plus a 5-minute heartbeat.
 | `charging` | bool? | no | client | null until the firmware sends it |
 | `worn` | bool? | no | client | null until lead-off is sent during streaming |
 | `battery` | int | yes | client | 0–100 |
+| `hr` | number? | no | client | latest BPM, 20–300; null when no beat in the last 5 s |
+| `rmssd` | number? | no | client | firmware RMSSD in ms, 0–1000; null for the first minute after connecting |
 | `lastSeenAt` | timestamp | yes | client | must equal `request.time` |
 
 Caregiver app: `lastSeenAt` older than 15 minutes means "no recent data".
+`hr` is only current when `connected` is true and `lastSeenAt` is under two
+minutes old; otherwise show it as "last reading at …".
 
 ### `recordings/{recordingId}`
 
@@ -176,6 +190,12 @@ Server only. `onHourlyCreated` rebuilds the vitals from all of the day's
 hours; recording triggers keep `recordingsCount`. Fields: `dayKey`, `date`,
 the hourly fields aggregated (HR weighted by `monitoredMin`),
 `hoursReported`, `recordingsCount`, `updatedAt`, `expireAt` (+2 years, TTL).
+
+---
+
+## `linkAttempts/{caregiverId}`
+
+Failed redemption counter. Server only; deleted on a successful link.
 
 ---
 

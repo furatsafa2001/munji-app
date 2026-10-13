@@ -43,6 +43,9 @@ async function ensureUser(uid, email, name) {
   } catch (e) {
     await auth.createUser({ uid, email, password: 'Test1234!', displayName: name });
   }
+  // the app sends unverified users to the verify screen, and the emulator
+  // never delivers the email, so seeded accounts start verified
+  await auth.updateUser(uid, { emailVerified: true });
 }
 
 async function main() {
@@ -103,55 +106,80 @@ async function main() {
 
   // ------------------------------------------------- device/current
   // one document per patient, overwritten on each update
-  const device = (serial, battery) => ({
+  const device = (serial, battery, hr, rmssd) => ({
     status: 'paired', serial, model: 'munji-v1', firmware: null,
-    pairedAt: now(), connected: true, charging: null, worn: null,
-    battery, lastSeenAt: now()
+    pairedAt: now(), connected: true, charging: null, worn: true,
+    battery, hr, rmssd, lastSeenAt: now()
   });
-  batch.set(db.doc(`users/${SAFA}/device/current`), device('MUNJI-3C84270B4F2A', 85));
-  batch.set(db.doc(`users/${AHMED}/device/current`), device('MUNJI-3C84270B7B11', 64));
+  batch.set(db.doc(`users/${SAFA}/device/current`), device('MUNJI-3C84270B4F2A', 85, 72, 38));
+  batch.set(db.doc(`users/${AHMED}/device/current`), device('MUNJI-3C84270B7B11', 64, 81, 24));
 
   // ---------------------------------------------------- hourly + daily
-  // yesterday, 08:00 to 13:00 Riyadh, so the history screen has data
-  const yKey = dayKey(Date.now() - DAY_MS);
-  const yStart = dayStartMs(yKey);
-  const hours = [];
-  for (let h = 8; h < 14; h++) {
-    const start = yStart + h * HOUR_MS;
-    const doc = {
-      hourStart: Timestamp.fromMillis(start),
-      dayKey: yKey,
-      hrAvg: 68 + h, hrMin: 55 + h, hrMax: 90 + h, hrvAvg: 38 + h / 2, qualityPct: null,
-      monitoredMin: h === 11 ? 20 : 55, leadOffMin: 5, chargingMin: h === 11 ? 35 : 0,
-      disconnectedMin: 0,
-      expireAt: Timestamp.fromMillis(start + 90 * DAY_MS),
-      createdAt: now()
-    };
-    hours.push(doc);
-    batch.set(db.doc(`users/${SAFA}/hourly/${hourKey(start)}`), doc);
+  // Two weeks of plausible days for Safa, 07:00 to 23:00 Riyadh, so every
+  // report period has something to show. Deterministic, so screenshots and
+  // tests are repeatable. Two days are left empty on purpose: reports must
+  // show a gap, not draw a line through it.
+  const SEED_DAYS = 14;
+  const emptyDays = new Set([5, 9]);
+  const wave = (d, h) => Math.sin((d * 24 + h) / 5);
+  let hourlyCount = 0;
+  for (let back = SEED_DAYS; back >= 1; back--) {
+    const key = dayKey(Date.now() - back * DAY_MS);
+    const start0 = dayStartMs(key);
+    const hours = [];
+    if (!emptyDays.has(back)) {
+      for (let h = 7; h < 23; h++) {
+        const start = start0 + h * HOUR_MS;
+        const base = 66 + 8 * wave(back, h) + (h >= 17 && h <= 19 ? 14 : 0); // evening walk
+        const charging = h === 13 ? 40 : 0;
+        const leadOff = (back + h) % 7 === 0 ? 8 : 1;
+        const doc = {
+          hourStart: Timestamp.fromMillis(start),
+          dayKey: key,
+          hrAvg: Math.round(base * 10) / 10,
+          hrMin: Math.round(base - 12),
+          hrMax: Math.round(base + 22),
+          hrvAvg: Math.round((42 - (base - 66) * 0.6) * 10) / 10,
+          qualityPct: null,
+          monitoredMin: 60 - charging - leadOff,
+          leadOffMin: leadOff,
+          chargingMin: charging,
+          disconnectedMin: 0,
+          expireAt: Timestamp.fromMillis(start + 90 * DAY_MS),
+          createdAt: now()
+        };
+        hours.push(doc);
+        batch.set(db.doc(`users/${SAFA}/hourly/${hourKey(start)}`), doc);
+        hourlyCount++;
+      }
+    }
+    if (hours.length) {
+      // the trigger builds this in real life; written here so the seed
+      // works without the functions emulator
+      batch.set(db.doc(`users/${SAFA}/daily/${key}`), {
+        dayKey: key,
+        date: Timestamp.fromMillis(start0),
+        ...computeDailyVitals(hours),
+        recordingsCount: back % 3 === 0 ? 1 : 0,
+        expireAt: Timestamp.fromMillis(start0 + 730 * DAY_MS),
+        updatedAt: now()
+      });
+    }
   }
-  // the trigger builds this in real life; written here so the seed works
-  // without the functions emulator
-  batch.set(db.doc(`users/${SAFA}/daily/${yKey}`), {
-    dayKey: yKey,
-    date: Timestamp.fromMillis(yStart),
-    ...computeDailyVitals(hours),
-    recordingsCount: 0,
-    expireAt: Timestamp.fromMillis(yStart + 730 * DAY_MS),
-    updatedAt: now()
-  });
 
   // --------------------------------------------------------- careLinks
   // id = {patientId}_{caregiverId} so rules can look it up without a query
   batch.set(db.doc(`careLinks/${SAFA}_${NORA}`), {
     patientId: SAFA, caregiverId: NORA, relation: 'daughter',
+    patientName: 'Safa Khan', caregiverName: 'Nora Khan',
     status: 'active', priority: 1,
-    createdAt: now(), activatedAt: now()
+    createdAt: now(), activatedAt: now(), revokedAt: null
   });
   batch.set(db.doc(`careLinks/${AHMED}_${NORA}`), {
     patientId: AHMED, caregiverId: NORA, relation: 'daughter',
+    patientName: 'Ahmed Khan', caregiverName: 'Nora Khan',
     status: 'active', priority: 1,
-    createdAt: now(), activatedAt: now()
+    createdAt: now(), activatedAt: now(), revokedAt: null
   });
 
   // --------------------------------------------------------- linkCodes
@@ -160,7 +188,7 @@ async function main() {
   batch.set(db.doc('linkCodes/482913'), {
     patientId: SAFA,
     createdAt: now(),
-    expiresAt: admin.firestore.Timestamp.fromMillis(Date.now() + 15 * 60 * 1000),
+    expiresAt: admin.firestore.Timestamp.fromMillis(Date.now() + 10 * 60 * 1000),
     used: false,
     attempts: 0
   });
@@ -217,8 +245,8 @@ async function main() {
   console.log('seeded:');
   console.log('  users              3   safa, ahmed, nora');
   console.log('  device/current     2   one per patient');
-  console.log(`  hourly             6   safa, ${yKey} 08:00-13:00`);
-  console.log('  daily              1   safa, yesterday');
+  console.log(`  hourly           ${hourlyCount}   safa, last 14 days 07:00-23:00 (two days empty)`);
+  console.log('  daily             12   safa, last 14 days');
   console.log('  careLinks          2   both patients linked to nora');
   console.log('  linkCodes          1   482913, expires in 15 min');
   console.log('  medAlarms          3   one added by the caregiver');

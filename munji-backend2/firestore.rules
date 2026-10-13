@@ -62,6 +62,12 @@ service cloud.firestore {
       return !(k in d) || d[k] == null || d[k] is bool;
     }
 
+    // absent, null, or a number within [lo, hi]
+    function optNumIn(d, k, lo, hi) {
+      return !(k in d) || d[k] == null
+             || (d[k] is number && d[k] >= lo && d[k] <= hi);
+    }
+
     function minutes(v) {
       return v is int && v >= 0 && v <= 60;
     }
@@ -117,7 +123,8 @@ service cloud.firestore {
           let d = request.resource.data;
           return docId == 'current'
                  && d.keys().hasOnly(['status', 'serial', 'model', 'firmware', 'pairedAt',
-                                      'connected', 'charging', 'worn', 'battery', 'lastSeenAt'])
+                                      'connected', 'charging', 'worn', 'battery', 'lastSeenAt',
+                                      'hr', 'rmssd'])
                  && d.keys().hasAll(['status', 'serial', 'model', 'pairedAt',
                                      'connected', 'battery', 'lastSeenAt'])
                  && d.status in ['paired', 'unpaired']
@@ -130,6 +137,9 @@ service cloud.firestore {
                  && optBool(d, 'charging')
                  && optBool(d, 'worn')
                  && d.battery is int && d.battery >= 0 && d.battery <= 100
+                 // latest reading for the caregiver, null when not fresh
+                 && optNumIn(d, 'hr', 20, 300)
+                 && optNumIn(d, 'rmssd', 0, 1000)
                  && d.lastSeenAt == request.time;      // server clock, not the phone's
         }
 
@@ -245,6 +255,10 @@ service cloud.firestore {
 
     match /linkCodes/{code} {
       allow read, write: if false;           // six digits — never client-readable
+    }
+
+    match /linkAttempts/{uid} {
+      allow read, write: if false;           // redemption rate limit, server only
     }
 
     // -------------------------------------------------------- medAlarms

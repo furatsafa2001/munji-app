@@ -3,14 +3,17 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import '../services/device_service.dart';
+import 'caregiver_screens.dart';
 import 'device_screen.dart';
+import 'patient_shell.dart';
 import 'profile_screen.dart';
 
 /// Decides where a verified user lands.
 ///
 /// A patient who has never paired a device is sent through device setup once —
 /// it is not optional, because Munji cannot monitor anything without it.
-/// Everyone else goes straight to the profile. The pairing flag lives in
+/// A paired patient lands on the home tabs; a caregiver on the list of
+/// people they look after. The pairing flag lives in
 /// Firestore (`devicePaired`) rather than in the device service, because the
 /// service is rebuilt on every launch and would otherwise forget.
 class AuthGate extends StatelessWidget {
@@ -61,7 +64,10 @@ class AuthGate extends StatelessWidget {
 
         // Only a patient's phone reports device status. start() is a no-op
         // once running, so rebuilds of this stream do not restart it.
-        if (isPatient) MunjiDevice.registry.start();
+        if (isPatient) {
+          MunjiDevice.registry.start();
+          MunjiDevice.hourly.start();
+        }
 
         if (isPatient && !paired) {
           return DeviceScreen(
@@ -77,7 +83,15 @@ class AuthGate extends StatelessWidget {
           );
         }
 
-        return ProfileScreen(
+        if (isPatient) {
+          return PatientShell(
+            isArabic: isArabic,
+            onLocaleChanged: onLocaleChanged,
+            fullName: (data['fullName'] ?? '') as String,
+          );
+        }
+
+        return CaregiverShell(
           isArabic: isArabic,
           onLocaleChanged: onLocaleChanged,
         );

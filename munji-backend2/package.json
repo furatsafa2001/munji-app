@@ -10,6 +10,7 @@
     "test:rules": "firebase emulators:exec --only auth,firestore,storage \"jest --runInBand\"",
     "test:accounts": "jest tests/accounts.test.js --runInBand",
     "test:functions": "npm --prefix functions test",
+    "test:links": "firebase emulators:exec --only firestore \"npm --prefix functions run test:links\"",
     "deploy:rules": "firebase deploy --only firestore:rules,storage",
     "deploy:indexes": "firebase deploy --only firestore:indexes",
     "deploy:functions": "firebase deploy --only functions"
