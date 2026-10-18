@@ -674,7 +674,7 @@ class _T {
       case CaptureFailure.rejected:
         return ar ? 'الملف لم يجتز التحقق. سجّل من جديد.' : 'The file did not pass the check. Record again.';
       case CaptureFailure.storageUnavailable:
-        return ar ? 'تخزين التسجيلات داخل المملكة قيد التفعيل.' : 'In-Kingdom recording storage is being set up.';
+        return ar ? 'تخزين التسجيلات قيد التفعيل.' : 'Recording storage is being set up.';
     }
   }
 

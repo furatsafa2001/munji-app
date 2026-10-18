@@ -12,7 +12,7 @@ class LinkService {
         _db = db ?? FirebaseFirestore.instance;
 
   /// Same region as Firestore and every other function.
-  static const region = 'me-central2';
+  static const region = 'me-central1';
 
   final FirebaseFunctions _fn;
   final FirebaseFirestore _db;

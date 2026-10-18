@@ -1,5 +1,5 @@
 /**
- * MUNJI Cloud Functions. Everything runs in me-central2 (see src/admin.js).
+ * MUNJI Cloud Functions. Everything runs in me-central1 (Doha) until CNTXT opens me-central2 (see src/admin.js).
  *
  *   onRecordingUploaded   storage finalize: validate .ecg, create its document
  *   onRecordingDeleted    storage delete: remove the document

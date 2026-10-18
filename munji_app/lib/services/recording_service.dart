@@ -17,8 +17,8 @@ import 'ecg_capture.dart';
 /// recording counts as saved when that document appears, not when the
 /// upload finishes.
 ///
-/// The bucket is in me-central2 (Dammam), so recordings stay in the
-/// Kingdom. Until CNTXT billing is active it exists only in the emulator.
+/// The bucket is in me-central1 (Doha) until CNTXT opens me-central2; then
+/// recordings move back into the Kingdom.
 class RecordingService {
   RecordingService({FirebaseStorage? storage, FirebaseFirestore? db, FirebaseAuth? auth})
       : _storage = storage ?? FirebaseStorage.instance,

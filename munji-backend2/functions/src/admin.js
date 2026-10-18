@@ -4,7 +4,7 @@ const { defineString } = require('firebase-functions/params');
 
 // Every function runs in Dammam, next to the data. Firestore triggers must
 // be in the database's region, and storage triggers in the bucket's.
-setGlobalOptions({ region: 'me-central2', maxInstances: 10 });
+setGlobalOptions({ region: 'me-central1', maxInstances: 10 });
 
 if (!admin.apps.length) admin.initializeApp();
 
