@@ -2,13 +2,46 @@ rules_version = '2';
 
 // MUNJI — Cloud Storage rules
 //
-// No direct client access to ECG data, in either direction.
-// Uploads and downloads both go through signed URLs issued by a function
-// after an ownership check. This is the week 4 deliverable; the baseline
-// here is deny-all so nothing leaks before that work lands.
+// One path holds ECG recordings: patients/{patientId}/recordings/{id}.ecg
+// The patient uploads and deletes their own files. A linked caregiver
+// reads them. The link is checked against the same caregiverIds list that
+// firestore.rules trusts, so there is one source of truth for access.
 
 service firebase.storage {
   match /b/{bucket}/o {
+
+    function caregiversOf(patientId) {
+      return firestore.get(/databases/(default)/documents/users/$(patientId))
+               .data.get('patient', {}).get('caregiverIds', []);
+    }
+
+    function isPatient(patientId) {
+      return request.auth != null && request.auth.uid == patientId;
+    }
+
+    function canRead(patientId) {
+      return isPatient(patientId)
+             || (request.auth != null && request.auth.uid in caregiversOf(patientId));
+    }
+
+    match /patients/{patientId}/recordings/{fileName} {
+
+      allow read: if canRead(patientId);
+
+      // Shape is checked here; the finalize trigger checks the content
+      // (header, sample count, exact size) and deletes anything invalid.
+      // Event strips (kind 'event') open in month 3 with the alert layer.
+      allow create: if resource == null
+                    && isPatient(patientId)
+                    && fileName.matches('^[A-Za-z0-9_-]{8,64}[.]ecg$')
+                    && request.resource.size <= 32 * 1024
+                    && request.resource.contentType == 'application/octet-stream'
+                    && request.resource.metadata.kind == 'manual';
+
+      allow update: if false;                // recordings are immutable
+      allow delete: if isPatient(patientId);
+    }
+
     match /{allPaths=**} {
       allow read, write: if false;
     }

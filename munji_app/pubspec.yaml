@@ -37,9 +37,14 @@ dependencies:
   firebase_core: ^4.13.0
   cloud_firestore: ^6.8.0
   firebase_auth: ^6.5.7
+  cloud_functions: ^6.0.0
+  firebase_storage: ^13.0.0
+  pdf: ^3.11.0
+  printing: ^5.13.0
   flutter_localizations:
     sdk: flutter
   flutter_blue_plus: ^2.3.12
+  permission_handler: ^12.0.1
 
 dev_dependencies:
   flutter_test:
@@ -62,6 +67,24 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  assets:
+    - assets/images/heart.webp
+    - assets/fonts/Tajawal-Regular.ttf
+    - assets/fonts/Tajawal-Bold.ttf
+
+  # Arabic UI font (the theme already asks for 'Tajawal'), and the PDF
+  # report loads the same files. OFL licence in assets/fonts/OFL.txt.
+  fonts:
+    - family: Tajawal
+      fonts:
+        - asset: assets/fonts/Tajawal-Regular.ttf
+        - asset: assets/fonts/Tajawal-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Tajawal-Bold.ttf
+          weight: 700
+        - asset: assets/fonts/Tajawal-ExtraBold.ttf
+          weight: 800
 
   # To add assets to your application, add an assets section, like this:
   # assets:

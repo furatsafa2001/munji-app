@@ -1,5 +1,8 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
+
+import 'input_rules.dart';
 
 /// Account creation and sign-in.
 ///
@@ -17,14 +20,13 @@ class AccountService {
   final FirebaseFirestore _db;
 
   /// Must match `firestore.rules`: ^\+[0-9]{8,15}$
-  static final _phone = RegExp(r'^\+[0-9]{8,15}$');
 
   User? get currentUser => _auth.currentUser;
   Stream<User?> get authState => _auth.authStateChanges();
 
   /// Create the account and its profile.
   ///
-  /// These are two writes that cannot be made atomic on the Spark plan, so
+  /// These are two writes that a client cannot make atomic, so
   /// if the profile fails we delete the auth account. An account with no
   /// profile is worse than no account: the person can sign in and the app
   /// has nothing to show them.
@@ -36,6 +38,8 @@ class AccountService {
     required String locale,
     required String role,
   }) async {
+    phone = normalizePhone(phone);
+    fullName = cleanName(fullName);
     _validate(
       email: email,
       password: password,
@@ -132,21 +136,18 @@ class AccountService {
     final changes = <String, dynamic>{};
 
     if (fullName != null) {
-      if (fullName.trim().isEmpty) {
-        throw AccountException('invalid-name', 'Full name is required.',
-            'الاسم الكامل مطلوب.');
+      final problem = nameProblem(fullName, false);
+      if (problem != null) {
+        throw AccountException('invalid-name', problem, nameProblem(fullName, true)!);
       }
-      changes['fullName'] = fullName.trim();
+      changes['fullName'] = cleanName(fullName);
     }
     if (phone != null) {
-      if (!_phone.hasMatch(phone)) {
-        throw AccountException(
-          'invalid-phone',
-          'Phone must be international, e.g. +966512345678.',
-          'أدخل الرقم بالصيغة الدولية، مثل ‎+966512345678‎.',
-        );
+      final problem = phoneProblem(phone, false);
+      if (problem != null) {
+        throw AccountException('invalid-phone', problem, phoneProblem(phone, true)!);
       }
-      changes['phone'] = phone;
+      changes['phone'] = normalizePhone(phone);
     }
     if (locale != null) {
       changes['locale'] = locale;
@@ -157,6 +158,36 @@ class AccountService {
   }
 
   Future<void> signOut() => _auth.signOut();
+
+  /// Deletes the account and everything in it, for good.
+  ///
+  /// The password is asked again first: deleting needs a sign-in from the
+  /// last few minutes (the server checks), so a phone left unlocked cannot
+  /// do it. Then the `accountDelete` function ends every caregiver link and
+  /// removes the profile, readings, recordings and the sign-in account.
+  Future<void> deleteAccount(String password) async {
+    final user = _auth.currentUser;
+    final email = user?.email;
+    if (user == null || email == null) {
+      throw AccountException('no-user', 'You are not signed in.', 'لست مسجّل الدخول.');
+    }
+    await user.reauthenticateWithCredential(
+      EmailAuthProvider.credential(email: email, password: password),
+    );
+    await user.getIdToken(true);
+    try {
+      await FirebaseFunctions.instanceFor(region: 'me-central1')
+          .httpsCallable('accountDelete')
+          .call<Map<String, dynamic>>();
+    } on FirebaseFunctionsException catch (e) {
+      throw AccountException(
+        'delete-failed:${e.code}',
+        'The account could not be deleted. Check your connection and try again.',
+        'تعذّر حذف الحساب. تأكد من اتصالك بالإنترنت ثم حاول مرة أخرى.',
+      );
+    }
+    await _auth.signOut();
+  }
 
   Future<void> sendPasswordReset(String email) =>
       _auth.sendPasswordResetEmail(email: email.trim());
@@ -206,16 +237,13 @@ class AccountService {
     if (role != 'patient' && role != 'caregiver') {
       throw AccountException('invalid-role', 'Invalid role.', 'الدور غير صحيح.');
     }
-    if (fullName.trim().isEmpty) {
-      throw AccountException(
-          'invalid-name', 'Full name is required.', 'الاسم الكامل مطلوب.');
+    final nameEn = nameProblem(fullName, false);
+    if (nameEn != null) {
+      throw AccountException('invalid-name', nameEn, nameProblem(fullName, true)!);
     }
-    if (!_phone.hasMatch(phone)) {
-      throw AccountException(
-        'invalid-phone',
-        'Phone must be international, e.g. +966512345678.',
-        'أدخل الرقم بالصيغة الدولية، مثل ‎+966512345678‎.',
-      );
+    final phoneEn = phoneProblem(phone, false);
+    if (phoneEn != null) {
+      throw AccountException('invalid-phone', phoneEn, phoneProblem(phone, true)!);
     }
     if (locale != 'ar' && locale != 'en') {
       throw AccountException('invalid-locale', 'Invalid language.', 'اللغة غير صحيحة.');
@@ -224,12 +252,9 @@ class AccountService {
       throw AccountException(
           'invalid-email', 'Enter a valid email.', 'أدخل بريدًا إلكترونيًا صحيحًا.');
     }
-    if (password.length < 8) {
-      throw AccountException(
-        'weak-password',
-        'Password must be at least 8 characters.',
-        'كلمة المرور يجب ألا تقل عن ٨ أحرف.',
-      );
+    final pwEn = passwordProblem(password, false);
+    if (pwEn != null) {
+      throw AccountException('weak-password', pwEn, passwordProblem(password, true)!);
     }
   }
 }
@@ -285,7 +310,17 @@ String authErrorMessage(Object e, bool isArabic) {
         return isArabic
             ? 'تعذّر الاتصال. تحقق من الإنترنت.'
             : 'No connection. Check your internet.';
+      case 'requires-recent-login':
+        return isArabic
+            ? 'لأمان حسابك، سجّل الخروج ثم الدخول مرة أخرى وأعد المحاولة.'
+            : 'For your security, sign out, sign in again, then retry.';
     }
+  }
+
+  if (e is FirebaseException && e.code == 'unavailable') {
+    return isArabic
+        ? 'تعذّر الاتصال. تحقق من الإنترنت.'
+        : 'No connection. Check your internet.';
   }
 
   if (e is FirebaseException && e.code == 'permission-denied') {
@@ -294,5 +329,7 @@ String authErrorMessage(Object e, bool isArabic) {
         : 'You do not have permission for this.';
   }
 
-  return isArabic ? 'حدث خطأ. حاول مرة أخرى.' : 'Something went wrong. Please try again.';
+  return isArabic
+      ? 'تعذّر إكمال العملية. تأكد من اتصالك بالإنترنت ثم حاول مرة أخرى.'
+      : 'That did not go through. Check your internet connection and try again.';
 }

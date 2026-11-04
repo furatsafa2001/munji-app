@@ -25,7 +25,8 @@ caregiver.
 | `locale` | string | yes | client | `ar` \| `en` |
 | `fcmTokens` | array\<string\> | yes | client | may be empty |
 | `createdAt` | timestamp | yes | client, immutable | |
-| `disabled` | bool | yes | server | |
+| `disabled` | bool | yes | server | client may create it only as `false`; rules reject any change |
+| `devicePaired` | bool | no | client | set once the patient finishes pairing; skips the pairing screen |
 | `patient` | map | if patient | mixed | see below |
 | `caregiver` | map | if caregiver | mixed | see below |
 
@@ -38,7 +39,6 @@ caregiver.
 | `knownConditions` | array\<string\> | no | client | |
 | `emergencyNumber` | string | yes | client | `911`. A field, not a constant, so it isn't hardcoded later |
 | `caregiverIds` | array\<string\> | yes | **server** | denormalised link — the whole rules model rests on this |
-| `activeDeviceId` | string | no | client | |
 
 ### `caregiver` map
 
@@ -62,13 +62,19 @@ at any privilege level.
 |---|---|---|---|---|
 | `patientId` | string | yes | server | |
 | `createdAt` | timestamp | yes | server | |
-| `expiresAt` | timestamp | yes | server | 15 minutes |
-| `used` | bool | yes | server | single use |
-| `attempts` | number | yes | server | lock at 5 |
+| `expiresAt` | timestamp | yes | server | 10 minutes, as in the design |
+| `used` | bool | yes | server | single use; also set when a newer code replaces it |
+| `attempts` | number | yes | server | kept for compatibility, not used for limiting |
 
 Six digits is one million combinations. If a client could query this
 collection the code space would be exhaustible in minutes, so redemption
-happens server-side with attempt limits — never by reading the document.
+happens server-side (`linkCodeRedeem`), never by reading the document.
+
+Limiting is per caregiver, in `linkAttempts/{caregiverId}`
+(`windowStart`, `count`): five wrong codes in 15 minutes and that account
+cannot redeem until the window passes. A counter on the code itself would
+never trip, because someone guessing tries a different code each time.
+A patient has at most one live code; asking for a new one retires the old.
 
 ---
 
@@ -81,13 +87,16 @@ to check permissions, instead of running a query — rules cannot query cheaply.
 |---|---|---|---|---|
 | `patientId` | string | yes | server, immutable | |
 | `caregiverId` | string | yes | server, immutable | |
-| `relation` | string | no | server | `daughter`, `son`, `spouse`, … |
+| `patientName` | string | yes | server | snapshot at link time, so the caregiver's list needs no extra read |
+| `caregiverName` | string | yes | server | snapshot; patients cannot read caregiver profiles |
+| `relation` | string? | no | server | `son` `daughter` `spouse` `sibling` `parent` `friend` `other`, chosen by the caregiver |
 | `status` | string | yes | server | `pending` \| `active` \| `revoked` |
 | `priority` | number | yes | server | 1 = primary, 2 = backup |
 
 | `createdAt` | timestamp | yes | server | |
 | `activatedAt` | timestamp | no | server | |
-| `revokedAt` | timestamp | no | server | |
+| `revokedAt` | timestamp? | no | server | |
+| `revokedBy` | string | no | server | uid of whoever ended it |
 
 There is no `permissions` map. Being linked is the permission: a linked
 caregiver sees the patient's data and manages their alarms. Per-feature
@@ -99,51 +108,101 @@ The document is kept, never deleted — you want the history of who had access.
 
 ---
 
-## `devices/{patientUid}`
+## Patient data: `users/{patientId}/...`
 
-**The document ID is the patient's uid** — one device per patient, enforced
-by the database rather than by application code. Pairing a new device
-overwrites the old document, so two active devices for one patient cannot
-exist and no cleanup step can be forgotten.
+Everything about one patient lives under their user document, so access and
+account deletion work from one path. Full design and reasoning: the
+*MUNJI Storage Design* doc. Times are UTC; hour and day keys are Asia/Riyadh.
 
-The only collection besides `users` that the client writes, because the
-phone is what talks to the device over BLE.
+### `device/current`
+
+One document per patient. A new pairing overwrites it. Written by the app
+every 5 seconds while connected (carrying `hr`), at once on
+anything the caregiver should know (link up or down, electrode off,
+charging, stabilizing, battery low, a reading appearing or disappearing,
+heart rate changing by 10 bpm or more), never more than once a second, and
+a 5-minute heartbeat while not connected.
 
 | Field | Type | Required | Writer | Notes |
 |---|---|---|---|---|
-| `patientId` | string | yes | client, immutable | must equal the document ID |
-| `serial` | string | yes | client | changes when the patient pairs a different unit |
-| `model` | string | yes | client | `munji-v1` |
-| `firmware` | string | no | client | |
-| `pairedAt` | timestamp | yes | client | |
 | `status` | string | yes | client | `paired` \| `unpaired` |
-| `battery` | number | no | client | 0–100 |
-| `signalQuality` | string | no | client | `good` \| `weak` \| `leadoff` |
-| `lastSeenAt` | timestamp | no | client | |
+| `serial` | string | yes | client | from `0x2A25`, e.g. `MUNJI-3C84270B4F2A` |
+| `model` | string | yes | client | `munji-v1` |
+| `firmware` | string? | no | client | null until the firmware exposes `0x2A26` |
+| `pairedAt` | timestamp | yes | client | `request.time`; changes only with `serial` |
+| `connected` | bool | yes | client | phone connected to the patch now |
+| `charging` | bool? | no | client | on the charger; the patch does not measure while charging |
+| `worn` | bool? | no | client | from the electrode status; null when it is more than 5 minutes old |
+| `stabilizing` | bool? | no | client | electrodes on, patch holding the ECG back for 30 s while contact settles |
+| `battery` | int | yes | client | 0–100 |
+| `hr` | number? | no | client | latest BPM, 20–300; null when no beat in the last 5 s |
+| `rmssd` | number? | no | client | no longer written (v3.7). HRV is shown from the latest recording, not live. Kept in the rules so older app builds still work |
+| `lastSeenAt` | timestamp | yes | client | must equal `request.time` |
+
+Caregiver app: `lastSeenAt` older than 15 minutes means "no recent data".
+`hr` is only current when `connected` is true and `lastSeenAt` is under 20
+seconds old (several missed 5-second writes); otherwise the reading is
+shown as not current.
+
+### `recordings/{recordingId}`
+
+Created by `onRecordingUploaded` only after the `.ecg` file passes
+validation. File: `patients/{patientId}/recordings/{recordingId}.ecg`
+(format in `functions/src/ecgFormat.js`).
+
+| Field | Type | Writer | Notes |
+|---|---|---|---|
+| `kind` | string | server | `manual` (30 s) \| `event` (60 s, month 3) |
+| `eventId` | string? | server | event strips only |
+| `startedAt` | timestamp | server | from the file header |
+| `durationSec` | number | server | 30 \| 60 |
+| `sampleRateHz` | number | server | 250 |
+| `uvPerLsb` | number | server | from the file header |
+| `storagePath` | string | server | |
+| `avgHr` | number? | server | from upload metadata |
+| `rmssd` | number? | server | HRV over the recording, ms, from upload metadata. Premature beats are left out; null when too few clean beats or too many irregular ones. This is the only HRV the app shows (home screens and reports) |
+| `deviceSerial`, `firmware` | string? | server | traceability |
+| `resultCode`, `resultTier`, `modelVersion` | string? | server | null until inference |
+| `saved` | bool | **patient** | the only field a client may change |
+| `createdAt` | timestamp | server | |
+
+Unsaved recordings are deleted 90 days after `createdAt` by
+`purgeRecordingsDaily`. Deleting the file deletes the document.
+
+### `events/{eventId}`
+
+Server only. Structure ready, used in month 3: `type`, `tier`
+(`warn`/`crit`/`tech`), `source` (`rule`/`model`), `startedAt`, `endedAt`,
+`hrAtEvent`, `modelVersion`, `recordingId`, `outcome { alertSentAt, ackAt,
+ackBy, escalatedAt }`.
+
+### `hourly/{yyyyMMddHH}`
+
+Written by the app once per finished hour, create only. TTL on `expireAt`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `hourStart` | timestamp | on the hour; id must be its Riyadh hour |
+| `dayKey` | string | first 8 characters of the id |
+| `hrAvg`, `hrMin`, `hrMax` | number? | 20–300, null when not monitored. `hrAvg` over every beat; `hrMin` and `hrMax` from one-minute averages (minutes with at least 10 beats), so one premature beat is not the hour's maximum |
+| `hrvAvg` | number? | no longer written (v3.7): HRV comes from the recordings |
+| `qualityPct` | number? | null until the quality gate runs on the phone |
+| `monitoredMin`, `leadOffMin`, `chargingMin`, `disconnectedMin` | int | sum ≤ 60. `leadOffMin` includes the 30 s stabilizing period after the electrodes go on |
+| `expireAt` | timestamp | exactly `hourStart` + 90 days |
+| `createdAt` | timestamp | `request.time` |
+
+### `daily/{yyyyMMdd}`
+
+Server only. `onHourlyCreated` rebuilds the vitals from all of the day's
+hours; recording triggers keep `recordingsCount`. Fields: `dayKey`, `date`,
+the hourly fields aggregated (HR weighted by `monitoredMin`),
+`hoursReported`, `recordingsCount`, `updatedAt`, `expireAt` (+2 years, TTL).
 
 ---
 
-## `recordings/{recordingId}`
+## `linkAttempts/{caregiverId}`
 
-Metadata for a one-time ECG capture. The waveform itself lives in Cloud
-Storage; this holds the pointer.
-
-| Field | Type | Required | Writer | Notes |
-|---|---|---|---|---|
-| `patientId` | string | yes | server | |
-| `startedAt` | timestamp | yes | server | |
-| `durationSec` | number | yes | server | 30 \| 60 \| 180 |
-| `avgHr` | number | no | server | |
-| `resultClass` | string | no | server | filled once inference exists |
-| `resultTier` | string | no | server | `ok` \| `warn` \| `crit` \| `tech` |
-| `storagePath` | string | yes | server | `recordings/{patientId}/{id}.json.gz` |
-| `pdfPath` | string | no | server | |
-| `createdBy` | string | yes | server | uid |
-| `modelVersion` | string | no | server | traceability — which model produced the result |
-
-Written by the storage finalize trigger, **after** the upload completes. The
-client never creates the document, so a record can never exist without its
-data.
+Failed redemption counter. Server only; deleted on a successful link.
 
 ---
 
@@ -166,8 +225,7 @@ Actions: `link_created`, `link_revoked`, `device_paired`, `recording_created`,
 
 ---
 
-## Not built yet
+## Retired
 
-`events`, `medAlarms`, `vitalsDaily`, `alerts` — schema is in
-`MUNJI_Architecture.md`. Their deny-rules already ship, so none of them is
-world-writable the day it appears.
+Top-level `devices`, `events`, `recordings`, `vitalsDaily` and `alerts` are
+gone. The default deny rule covers them.

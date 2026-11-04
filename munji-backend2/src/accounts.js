@@ -8,8 +8,8 @@
  * Two things worth knowing before reading:
  *
  * 1. Creating an account is two writes that must both succeed — the Auth
- *    record and the users document. Firebase cannot do them atomically on
- *    the Spark plan, so if the second fails we delete the first. An Auth
+ *    record and the users document. A client cannot do them atomically,
+ *    so if the second fails we delete the first. An Auth
  *    account with no profile is worse than no account at all: the person
  *    can sign in, and the app has nothing to show them.
  *

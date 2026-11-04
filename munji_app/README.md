@@ -1,17 +1,30 @@
-# munji_app
+# Munji app
 
-A new Flutter project.
+## Run during development (local emulator)
 
-## Getting Started
+1. In `munji-backend2`: `npm run emu` (leave it running)
+2. Once, after the emulator starts: `npm run seed`
+3. Here: `./scripts/run_emulator.sh` (macOS) or `.\scripts\run_emulator.ps1` (Windows)
 
-This project is a starting point for a Flutter application.
+Linking (patient to caregiver), recording checks and account deletion run
+on Cloud Functions. If the functions are not deployed to the project the
+app talks to, the linking screens show "not available right now".
 
-A few resources to get you started if this is your first Flutter project:
+Phone and Mac must be on the same Wi-Fi. Test account: `safa.khan@email.com` / `Test1234!`
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+## Run against the real Firebase project
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+    flutter run
+
+Creates real accounts. Needs the rules, indexes and functions deployed to
+`munji-dev` (me-central1, Doha): see `munji-backend2/README.md`.
+
+## Build an APK for the hardware engineer
+
+    flutter build apk --release
+
+Output: `build/app/outputs/flutter-apk/app-release.apk`. Release builds always use the real project, never the emulator.
+
+## Bench testing the patch
+
+Device screen, once connected: "Live readings" (القراءات المباشرة). Turn off with `DeviceConfig.showLiveReadings` before patient release.

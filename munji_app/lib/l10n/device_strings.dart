@@ -75,6 +75,17 @@ class DS {
       'Check the device is switched on and near you.');
 
   String get bluetoothOff => _('البلوتوث مغلق', 'Bluetooth is off');
+
+  // Bluetooth permission refused (not the same as Bluetooth being off)
+  String get permissionNeeded =>
+      _('منجي يحتاج إذن الأجهزة القريبة', 'Munji needs Nearby devices access');
+  String get permissionNeededSub => _(
+      'بدون هذا الإذن لا يستطيع منجي الوصول للاصقة. اضغط سماح عند ظهور الطلب.',
+      'Without it Munji cannot reach the patch. Tap Allow when asked.');
+  String get permissionBlockedSub => _(
+      'رفضت الإذن سابقًا، فلن يظهر الطلب مرة أخرى. افتح الإعدادات ثم الأذونات وفعّل الأجهزة القريبة.',
+      'You declined before, so the request will not appear again. Open settings, then Permissions, and allow Nearby devices.');
+  String get allowAccess => _('السماح بالوصول', 'Allow access');
   String get bluetoothOffSub => _(
       'شغّل البلوتوث من إعدادات هاتفك ليتابع منجي قلبك.',
       'Turn Bluetooth on in your phone settings so Munji can watch your heart.');

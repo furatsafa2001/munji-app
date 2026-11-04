@@ -2,11 +2,16 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
+import 'package:permission_handler/permission_handler.dart' show openAppSettings;
 
 import '../l10n/device_strings.dart';
+import '../services/background_monitor.dart';
+import '../services/device_config.dart';
 import '../services/device_service.dart';
+import '../services/real_device_service.dart';
 import '../theme/munji_theme.dart';
 import '../widgets/pairing_orb.dart';
+import 'live_readings_screen.dart';
 
 /// Why this screen exists twice.
 ///
@@ -119,10 +124,22 @@ class _DeviceScreenState extends State<DeviceScreen> {
     }
   }
 
+  RealMunjiDeviceService? get _realService {
+    final s = _service;
+    return s is RealMunjiDeviceService ? s : null;
+  }
+
+  bool get _needsPermission =>
+      _state.phase == DevicePhase.bluetoothOff &&
+      (_realService?.permissionMissing ?? false);
+
+  bool get _permissionBlocked =>
+      _needsPermission && (_realService?.permissionBlocked ?? false);
+
   String _lead(DS t) {
     switch (_state.phase) {
       case DevicePhase.bluetoothOff:
-        return t.bluetoothOff;
+        return _needsPermission ? t.permissionNeeded : t.bluetoothOff;
       case DevicePhase.idle:
         return t.turnOnBluetooth;
       case DevicePhase.scanning:
@@ -145,7 +162,8 @@ class _DeviceScreenState extends State<DeviceScreen> {
   String _subText(DS t) {
     switch (_state.phase) {
       case DevicePhase.bluetoothOff:
-        return t.bluetoothOffSub;
+        if (_permissionBlocked) return t.permissionBlockedSub;
+        return _needsPermission ? t.permissionNeededSub : t.bluetoothOffSub;
       case DevicePhase.idle:
         return t.turnOnBluetoothSub;
       case DevicePhase.scanning:
@@ -172,6 +190,7 @@ class _DeviceScreenState extends State<DeviceScreen> {
   String? _buttonLabel(DS t) {
     switch (_state.phase) {
       case DevicePhase.bluetoothOff:
+        if (_needsPermission && !_permissionBlocked) return t.allowAccess;
         return t.openSettings;
       case DevicePhase.idle:
         return t.continueLabel;
@@ -200,7 +219,13 @@ class _DeviceScreenState extends State<DeviceScreen> {
 
     switch (_state.phase) {
       case DevicePhase.bluetoothOff:
-        await _service.refresh();
+        // Refused for good: only the settings app can change it. Coming
+        // back, the next tap asks the service to check again.
+        if (_permissionBlocked) {
+          await openAppSettings();
+        } else {
+          await _service.refresh();
+        }
         break;
       case DevicePhase.idle:
         await _service.startScan();
@@ -332,6 +357,18 @@ class _DeviceScreenState extends State<DeviceScreen> {
                 else
                   SizedBox(height: (w * 0.17).clamp(48, 54)),
 
+                // Bench testing only, see DeviceConfig.showLiveReadings.
+                if (_state.phase == DevicePhase.connected &&
+                    DeviceConfig.showLiveReadings &&
+                    _service is RealMunjiDeviceService)
+                  TextButton(
+                    onPressed: _openLiveReadings,
+                    child: Text(
+                      widget.isArabic ? 'القراءات المباشرة' : 'Live readings',
+                      style: MunjiText.label.copyWith(color: MunjiColors.blue),
+                    ),
+                  ),
+
                 if (_state.paired &&
                     widget.mode == DeviceScreenMode.settings &&
                     _state.phase != DevicePhase.connecting)
@@ -349,6 +386,17 @@ class _DeviceScreenState extends State<DeviceScreen> {
         ),
       ),
     );
+  }
+
+  void _openLiveReadings() {
+    final service = _service;
+    if (service is! RealMunjiDeviceService) return;
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => LiveReadingsScreen(
+        service: service,
+        isArabic: widget.isArabic,
+      ),
+    ));
   }
 
   void _showHelp(DS t) {
@@ -393,7 +441,11 @@ class _DeviceScreenState extends State<DeviceScreen> {
         ],
       ),
     );
-    if (ok == true) await _service.forget();
+    if (ok == true) {
+      await MunjiDevice.registry.markUnpaired();
+      await _service.forget();
+      await BackgroundMonitor.stop();
+    }
   }
 }
 

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../l10n/strings.dart';
 import '../services/account_service.dart';
+import '../services/input_rules.dart';
 import '../theme/munji_theme.dart';
 import '../widgets/munji_widgets.dart';
 
@@ -115,8 +116,8 @@ class _SignUpScreenState extends State<SignUpScreen> {
                 label: s.fullName,
                 hint: s.fullNameHint,
                 controller: _name,
-                validator: (v) =>
-                    (v == null || v.trim().isEmpty) ? s.required : null,
+                inputFormatters: [LengthLimitingTextInputFormatter(nameMax + 10)],
+                validator: (v) => nameProblem(v ?? '', widget.isArabic),
               ),
               const SizedBox(height: 16),
 
@@ -146,19 +147,11 @@ class _SignUpScreenState extends State<SignUpScreen> {
                 // an Arabic interface
                 textDirection: TextDirection.ltr,
                 inputFormatters: [
+                  const AsciiDigitsFormatter(),
                   FilteringTextInputFormatter.allow(RegExp(r'[0-9+]')),
                   LengthLimitingTextInputFormatter(16),
                 ],
-                validator: (v) {
-                  final value = (v ?? '').replaceAll(' ', '');
-                  if (value.isEmpty || value == '+966') return s.required;
-                  if (!RegExp(r'^\+[0-9]{8,15}$').hasMatch(value)) {
-                    return widget.isArabic
-                        ? 'أدخل الرقم بالصيغة الدولية، مثل ‎+966512345678‎'
-                        : 'Use international format, e.g. +966512345678';
-                  }
-                  return null;
-                },
+                validator: (v) => phoneProblem(v ?? '', widget.isArabic),
               ),
               const SizedBox(height: 16),
 
@@ -173,15 +166,8 @@ class _SignUpScreenState extends State<SignUpScreen> {
                       size: 20, color: MunjiColors.muted),
                   onPressed: () => setState(() => _showPassword = !_showPassword),
                 ),
-                validator: (v) {
-                  if (v == null || v.isEmpty) return s.required;
-                  if (v.length < 8) {
-                    return widget.isArabic
-                        ? '٨ أحرف على الأقل'
-                        : 'At least 8 characters';
-                  }
-                  return null;
-                },
+                inputFormatters: [LengthLimitingTextInputFormatter(passwordMax)],
+                validator: (v) => passwordProblem(v ?? '', widget.isArabic),
               ),
 
               if (_error != null) ...[

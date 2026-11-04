@@ -1,5 +1,8 @@
 import 'dart:async';
 
+import 'device_registry.dart';
+import 'hourly_recorder.dart';
+
 /// MUNJI device connection.
 ///
 /// The Munji device is meant to be connected at all times — it is worn, it
@@ -47,6 +50,9 @@ class DeviceState {
     this.signal = 3,
     this.lastSeen,
     this.paired = false,
+    this.charging,
+    this.batteryFull,
+    this.stabilizing,
   });
 
   final DevicePhase phase;
@@ -62,6 +68,17 @@ class DeviceState {
   final DateTime? lastSeen;
 
   final bool paired;
+
+  /// True while on the charger. Null until the firmware reports it (see
+  /// DeviceConfig.chargingCharacteristicUuid).
+  final bool? charging;
+
+  /// On the charger and full. Null until the firmware reports it.
+  final bool? batteryFull;
+
+  /// Electrodes on, ECG held back while contact settles. Null until the
+  /// firmware reports it.
+  final bool? stabilizing;
 
   bool get isLive => phase == DevicePhase.connected;
 
@@ -83,6 +100,9 @@ class DeviceState {
     int? signal,
     DateTime? lastSeen,
     bool? paired,
+    bool? charging,
+    bool? batteryFull,
+    bool? stabilizing,
   }) {
     return DeviceState(
       phase: phase ?? this.phase,
@@ -91,6 +111,9 @@ class DeviceState {
       signal: signal ?? this.signal,
       lastSeen: lastSeen ?? this.lastSeen,
       paired: paired ?? this.paired,
+      charging: charging ?? this.charging,
+      batteryFull: batteryFull ?? this.batteryFull,
+      stabilizing: stabilizing ?? this.stabilizing,
     );
   }
 }
@@ -257,13 +280,29 @@ class MunjiDevice {
   MunjiDevice._();
 
   static MunjiDeviceService? _instance;
+  static DeviceRegistry? _registry;
 
   static MunjiDeviceService get instance =>
       _instance ??= FakeMunjiDeviceService(alreadyPaired: false);
 
+  /// Keeps devices/{uid} in step with the link. Created lazily so tests can
+  /// construct the service without touching Firestore.
+  static DeviceRegistry get registry =>
+      _registry ??= DeviceRegistry(service: instance);
+
+  static HourlyRecorder? _hourly;
+
+  /// Writes the hourly summaries that reports are built from.
+  static HourlyRecorder get hourly =>
+      _hourly ??= HourlyRecorder(service: instance, registry: registry);
+
   /// Swap in the real BLE implementation here once the firmware exists.
   static void use(MunjiDeviceService service) {
     _instance?.dispose();
+    _hourly?.stop();
+    _hourly = null;
+    _registry?.stop();
+    _registry = null;
     _instance = service;
   }
 }

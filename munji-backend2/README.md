@@ -11,13 +11,13 @@ here as ceremony.
 
 **Emulator** — where you actually work. Instant, free, wiped every run.
 
-**`munji-dev`** — one cloud project. Exists because a phone doing BLE pairing
-can't reach `localhost` on your laptop, so the mobile app needs a real
-endpoint.
+**`munji-dev`** — one cloud project in `me-central1` (Doha), agreed with the
+client. Exists because a phone doing BLE pairing can't reach `localhost` on
+your laptop, so the mobile app needs a real endpoint.
 
-That's it for now. Production comes later and goes to `me-central2` (Dammam)
-through CNTXT — **a Firestore location is permanent**, so that project gets
-created deliberately, not by accident.
+That's it for now. **A Firestore location is permanent**, so a production
+project, and whether it stays in Doha or moves to `me-central2` (Dammam),
+is decided deliberately before real patients, not by accident.
 
 ---
 
@@ -40,31 +40,37 @@ ahmed.khan@email.com   patient    linked to Nora, device dev_7B11
 nora.khan@email.com    caregiver  linked to both
 ```
 
-Live pairing code: `482913`, expires 15 minutes after seeding.
+Live link code: `482913` (for Safa), expires 10 minutes after seeding.
+Nora is already linked to Safa, so to try redeeming it, sign up a new
+caregiver account in the app and enter the code. Seeded accounts start
+with their email verified.
 
 ---
 
 ## Collections
 
-Built now — the spine everything else hangs off:
+Built now. Patient data lives under the patient's own document, so access
+and account deletion work from one path (full field list in
+`schema/collections.md`):
 
-| Collection | Purpose |
+| Path | Purpose |
 |---|---|
-| `users` | patient and caregiver profiles |
+| `users/{uid}` | patient and caregiver profiles |
+| `users/{uid}/device/current` | paired patch: connection, battery, charging, latest HR and HRV for the caregiver |
+| `users/{uid}/recordings/{id}` | ECG capture metadata; the file is in Storage |
+| `users/{uid}/hourly/{yyyyMMddHH}` | hourly summary written by the phone |
+| `users/{uid}/daily/{yyyyMMdd}` | daily summary built by a function |
 | `linkCodes` | 6-digit pairing code, server-only |
+| `linkAttempts` | redemption rate limit, server-only |
 | `careLinks` | patient ↔ caregiver relationship |
-| `devices` | paired device, battery, signal state |
-| `recordings` | ECG capture metadata + storage path |
 | `auditLog` | append-only trail |
 
 Schema known, not built yet:
 
-| Collection | Blocked on |
+| Path | Blocked on |
 |---|---|
-| `events` | inference service |
-| `medAlarms` | mobile alarm screens wiring up |
-| `vitalsDaily` | rollup functions |
-| `alerts` | notification layer |
+| `users/{uid}/events` | on-phone inference and the alert layer (month 3) |
+| `medAlarms` | out of current scope; rules kept |
 
 **Their deny-rules ship now anyway.** A collection with no rule is writable
 by anyone the moment it's created. Deny first, open later — it costs nothing
@@ -76,8 +82,39 @@ today and closes a hole you'd never think to look for.
 
 1. Rules + emulator + seed **← done**
 2. Auth and account creation **← done** (`src/accounts.js`)
-3. `linkCode_generate` / `linkCode_redeem`, `careLinks`, App Check
-4. Signed upload/download URLs, finalize trigger writes `recordings`
+3. Patient data under `users/{uid}`, Storage rules, recording validation,
+   hourly and daily summaries **← done**
+4. Linking (`linkCodeGenerate` / `linkCodeRedeem` / `linkRevoke`) and
+   account deletion **← done**. App Check **← not yet**
+
+### Functions (`functions/`)
+
+| Function | Trigger | Does |
+|---|---|---|
+| `onRecordingUploaded` | Storage finalize | validates the `.ecg`, creates `users/{uid}/recordings/{id}` |
+| `onRecordingDeleted` | Storage delete | removes the document |
+| `purgeRecordingsDaily` | 03:00 Riyadh | deletes unsaved recordings after 90 days |
+| `onHourlyCreated` | Firestore create | rebuilds `users/{uid}/daily/{day}` |
+| `linkCodeGenerate` | callable | patient gets a 6-digit code, valid 10 minutes; retires any earlier one |
+| `linkCodeRedeem` | callable | caregiver redeems it; 5 wrong codes per 15 minutes per caregiver |
+| `linkRevoke` | callable | either side ends a link |
+| `accountDelete` | callable | the user deletes their account, links, data and files |
+
+All run in `me-central1` (Doha). The bucket name comes from `functions/.env`
+(`ECG_BUCKET`), and the app must use the same bucket.
+
+```bash
+npm --prefix functions install
+npm run test:functions     # unit tests, no emulator needed
+npm run test:links         # linking against the Firestore emulator
+npm run emu                # now also starts functions + storage
+npm run seed               # uploads a sample recording; the trigger validates it
+```
+
+TTL on `hourly.expireAt` and `daily.expireAt` is declared in
+`firestore.indexes.json`. If the deploy rejects the `ttl` key, set it with
+`gcloud firestore fields ttls update expireAt --collection-group=hourly --enable-ttl`
+(and the same for `daily`).
 
 ---
 
@@ -95,8 +132,7 @@ signOutUser(auth)
 ```
 
 **Why rollback.** Creating an account is two writes — the Auth record and
-the `users` document — and Firebase cannot make them atomic on the Spark
-plan. If the second fails we delete the first, because an Auth account with
+the `users` document — and a client cannot make them atomic. If the second fails we delete the first, because an Auth account with
 no profile is worse than no account: the person can sign in and the app has
 nothing to show. If the rollback itself fails, `signIn` throws
 `profile-missing` and the app calls `repairProfile`.
@@ -118,22 +154,29 @@ Step 4 is the first point where the mobile app stores something real.
 
 ## Indexes
 
-Two, because two queries need them. Firestore errors on a missing composite
+Two composite indexes, because two queries need them: caregiver links, and
+the collection-group query that finds expired unsaved recordings. Firestore errors on a missing composite
 index and prints the exact index to add, so there's no reason to guess ahead
 of a real query — speculative indexes just cost write throughput on every
 document you touch.
 
 ---
 
-## Rules: two invariants
+## Rules
 
-**Clients never write clinical data.** `events`, `recordings`, `alerts` and
-`vitalsDaily` are server-written. A client that can write an event can
+**Clients never write clinical data.** `events`, `recordings` and `daily`
+are server-written. The phone writes only what it measures: `device/current`
+and `hourly`, both shape-checked with server timestamps. A client that can write an event can
 fabricate a cardiac emergency, or hide a real one.
 
 **The care relationship is server-written.** `caregiverIds` is denormalised
 onto the patient document so rules can check membership without a query, and
 only `linkCode_redeem` and `link_revoke` may touch it.
+
+**Profiles have a fixed shape.** A `users` document may hold only the
+listed top-level fields, and `disabled` is server-written: a client may
+create it only as `false` and can never change it, so a suspended account
+cannot lift its own suspension.
 
 **Being linked is the permission.** There are no per-feature toggles. A
 caregiver the patient has linked can see their data and manage their
@@ -155,8 +198,8 @@ ends access — every rule reads that list, so the effect is immediate across
 profile, device, alarms and recordings. The `careLink` document stays,
 marked `revoked`, because who had access and when is worth keeping.
 
-**One device per patient.** The `devices` document ID *is* the patient's
-uid, so pairing a new device overwrites the old one. Two active devices for
+**One device per patient.** The device lives at `users/{uid}/device/current`,
+a single fixed id, so pairing a new device overwrites the old one. Two active devices for
 one patient are impossible by construction rather than by a check somebody
 has to remember to write.
 
@@ -183,8 +226,8 @@ It becomes a compliance artifact later. Right now it's a debugging tool.
 | Decision | Why | Revisit |
 |---|---|---|
 | Direct Firestore + callable functions, no REST | Caregiver dashboard runs on realtime listeners; REST would force polling | — |
-| `me-central1` (Doha) for dev | Nearest low-latency region, self-serve, test data only | before real patients |
+| `me-central1` (Doha) | Nearest low-latency region, self-serve; agreed with the client | before real patients |
 | No production project yet | Firestore location is permanent | before real patients |
 | Email + password auth | Phone OTP means paying for a second SMS route before the Unifonic sender ID is live | once Unifonic is set up |
-| Cloud inference | Fine while data is synthetic; on real patients a network gap becomes a monitoring gap | before real patients |
+| On-phone inference (TFLite) | A network gap must not become a monitoring gap; the server only stores results | — |
 | Firebase | Fastest path for two people; exit cost is real and accepted | if KSA residency becomes hard |

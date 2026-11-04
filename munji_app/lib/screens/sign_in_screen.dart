@@ -3,6 +3,7 @@ import '../l10n/strings.dart';
 import '../services/account_service.dart';
 import '../theme/munji_theme.dart';
 import '../widgets/munji_widgets.dart';
+import 'forgot_password_screen.dart';
 import 'sign_up_screen.dart';
 
 class SignInScreen extends StatefulWidget {
@@ -48,18 +49,16 @@ class _SignInScreenState extends State<SignInScreen> {
     }
   }
 
-  Future<void> _reset() async {
-    final s = S(widget.isArabic);
-    if (_email.text.trim().isEmpty) {
-      setState(() => _error = s.enterEmailFirst);
-      return;
-    }
-    try {
-      await _service.sendPasswordReset(_email.text);
-      if (mounted) setState(() { _notice = s.resetSent; _error = null; });
-    } catch (e) {
-      if (mounted) setState(() => _error = authErrorMessage(e, widget.isArabic));
-    }
+  /// Its own screen: type the email, then the emailed link sets the new
+  /// password. Whatever is already in the email field comes along.
+  void _reset() {
+    setState(() { _error = null; _notice = null; });
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => ForgotPasswordScreen(
+        isArabic: widget.isArabic,
+        initialEmail: _email.text.trim(),
+      ),
+    ));
   }
 
   @override

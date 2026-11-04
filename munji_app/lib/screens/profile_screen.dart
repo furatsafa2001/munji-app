@@ -3,11 +3,14 @@ import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../l10n/strings.dart';
 import '../services/account_service.dart';
+import '../services/input_rules.dart';
 import '../theme/munji_theme.dart';
 import '../widgets/munji_widgets.dart';
 import '../l10n/device_strings.dart';
+import '../services/background_monitor.dart';
+import '../services/device_service.dart';
+import 'caregivers_screen.dart';
 import 'device_screen.dart';
-import 'sign_in_screen.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key, required this.isArabic, required this.onLocaleChanged});
@@ -87,15 +90,25 @@ class _ProfileScreenState extends State<ProfileScreen> {
     if (ok != true) return;
     await _service.signOut();
     if (!mounted) return;
-    Navigator.of(context).pushAndRemoveUntil(
-      MaterialPageRoute(
-        builder: (_) => SignInScreen(
-          isArabic: widget.isArabic,
-          onLocaleChanged: widget.onLocaleChanged,
-        ),
+    // Back to the root route only. The auth stream in main.dart shows
+    // sign-in from there. Pushing a SignInScreen of our own (as this used
+    // to) replaced that root, so signing up or in afterwards went nowhere.
+    Navigator.of(context, rootNavigator: true).popUntil((r) => r.isFirst);
+  }
+
+  Future<void> _confirmDelete(bool isPatient) async {
+    final deleted = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _DeleteAccountDialog(
+        isArabic: widget.isArabic,
+        isPatient: isPatient,
+        service: _service,
       ),
-      (_) => false,
     );
+    if (deleted != true || !mounted) return;
+    // main.dart's auth stream shows sign-in from the root route
+    Navigator.of(context, rootNavigator: true).popUntil((r) => r.isFirst);
   }
 
   @override
@@ -121,8 +134,29 @@ class _ProfileScreenState extends State<ProfileScreen> {
               return const Center(child: CircularProgressIndicator());
             }
             final p = snap.data;
-            if (p == null) {
-              return Center(child: Text(s.loading, style: MunjiText.body));
+            if (snap.hasError || p == null) {
+              // Never a "loading" that does not end: say what is wrong and
+              // leave a way out.
+              return Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(MunjiSpace.xxl),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      MunjiError(widget.isArabic
+                          ? 'تعذّر تحميل بيانات حسابك. تأكد من اتصالك بالإنترنت.'
+                          : 'Could not load your account. Check your connection.'),
+                      const SizedBox(height: MunjiSpace.lg),
+                      TextButton(
+                        onPressed: _confirmSignOut,
+                        child: Text(s.signOut,
+                            style: MunjiText.label
+                                .copyWith(color: MunjiColors.red)),
+                      ),
+                    ],
+                  ),
+                ),
+              );
             }
 
             final name = (p['fullName'] ?? '') as String;
@@ -204,7 +238,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
                 if (_editing) ...[
                   MunjiSectionLabel(s.editProfile),
-                  MunjiField(label: s.fullName, controller: _name),
+                  MunjiField(
+                    label: s.fullName,
+                    controller: _name,
+                    inputFormatters: [LengthLimitingTextInputFormatter(nameMax + 10)],
+                  ),
                   const SizedBox(height: 16),
                   MunjiField(
                     label: s.phone,
@@ -213,6 +251,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     keyboardType: TextInputType.phone,
                     textDirection: TextDirection.ltr,
                     inputFormatters: [
+                      const AsciiDigitsFormatter(),
                       FilteringTextInputFormatter.allow(RegExp(r'[0-9+]')),
                       LengthLimitingTextInputFormatter(16),
                     ],
@@ -260,8 +299,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       },
                     ),
                   ),
-                  const SizedBox(height: MunjiSpace.sm),
-                  MunjiRow(
+                  if (isPatient) const SizedBox(height: MunjiSpace.sm),
+                  if (isPatient) MunjiRow(
                     icon: Icons.bluetooth,
                     title: DS(widget.isArabic).munjiDevice,
                     subtitle: DS(widget.isArabic).device,
@@ -274,6 +313,22 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       ),
                     ),
                   ),
+                  if (isPatient) ...[
+                    const SizedBox(height: MunjiSpace.sm),
+                    MunjiRow(
+                      icon: Icons.group_outlined,
+                      title: widget.isArabic ? 'المرافقون' : 'My caregivers',
+                      subtitle: widget.isArabic
+                          ? 'من يتابع حالتك'
+                          : 'Who follows your heart data',
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) =>
+                              CaregiversScreen(isArabic: widget.isArabic),
+                        ),
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 26),
                   MunjiRow(
                     icon: Icons.logout,
@@ -281,12 +336,143 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     tone: PillTone.critical,
                     onTap: _confirmSignOut,
                   ),
+                  const SizedBox(height: MunjiSpace.sm),
+                  MunjiRow(
+                    icon: Icons.delete_forever_outlined,
+                    title: widget.isArabic ? 'حذف الحساب' : 'Delete account',
+                    subtitle: widget.isArabic
+                        ? 'حذف نهائي لحسابك وبياناتك'
+                        : 'Permanently remove your account and data',
+                    tone: PillTone.critical,
+                    onTap: () => _confirmDelete(isPatient),
+                  ),
                 ],
               ],
             );
           },
         ),
       ),
+    );
+  }
+}
+
+/// Asks for the password, says plainly what will be lost, then deletes.
+class _DeleteAccountDialog extends StatefulWidget {
+  const _DeleteAccountDialog({
+    required this.isArabic,
+    required this.isPatient,
+    required this.service,
+  });
+
+  final bool isArabic;
+  final bool isPatient;
+  final AccountService service;
+
+  @override
+  State<_DeleteAccountDialog> createState() => _DeleteAccountDialogState();
+}
+
+class _DeleteAccountDialogState extends State<_DeleteAccountDialog> {
+  final _password = TextEditingController();
+  bool _busy = false;
+  String? _error;
+
+  bool get ar => widget.isArabic;
+
+  @override
+  void dispose() {
+    _password.dispose();
+    super.dispose();
+  }
+
+  Future<void> _delete() async {
+    if (_password.text.isEmpty) {
+      setState(() => _error = ar ? 'اكتب كلمة المرور للتأكيد' : 'Enter your password to confirm');
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    // Nothing may write for this account while it is being removed.
+    MunjiDevice.hourly.stop();
+    MunjiDevice.registry.stop();
+    await BackgroundMonitor.stop();
+    try {
+      await widget.service.deleteAccount(_password.text);
+      try {
+        await MunjiDevice.instance.forget();
+      } catch (_) {}
+      if (mounted) Navigator.of(context).pop(true);
+    } catch (e) {
+      // still here: put monitoring back the way it was
+      if (widget.isPatient) {
+        MunjiDevice.registry.start();
+        MunjiDevice.hourly.start();
+        if (MunjiDevice.registry.isPaired) BackgroundMonitor.start(isArabic: ar);
+      }
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _error = authErrorMessage(e, ar);
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final lose = widget.isPatient
+        ? (ar
+            ? 'سيُحذف نهائيًا: ملفك، قراءاتك، تقاريرك، تسجيلات تخطيط القلب، وربطك بكل المرافقين. لا يمكن التراجع.'
+            : 'This permanently deletes your profile, readings, reports, ECG recordings and every caregiver link. It cannot be undone.')
+        : (ar
+            ? 'سيُحذف حسابك نهائيًا ويُلغى ربطك بكل من ترعاهم. بياناتهم لا تتأثر. لا يمكن التراجع.'
+            : 'This permanently deletes your account and ends every link to the people you care for. Their data is not affected. It cannot be undone.');
+
+    return AlertDialog(
+      backgroundColor: Colors.white,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(MunjiRadius.r3)),
+      title: Text(ar ? 'حذف الحساب؟' : 'Delete account?', style: MunjiText.h3),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(lose, style: MunjiText.small.copyWith(fontSize: 13)),
+            const SizedBox(height: MunjiSpace.lg),
+            TextField(
+              controller: _password,
+              obscureText: true,
+              enabled: !_busy,
+              textDirection: TextDirection.ltr,
+              decoration: InputDecoration(
+                labelText: ar ? 'كلمة المرور' : 'Password',
+              ),
+              onSubmitted: (_) => _busy ? null : _delete(),
+            ),
+            if (_error != null) ...[
+              const SizedBox(height: MunjiSpace.md),
+              MunjiError(_error!),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.of(context).pop(false),
+          child: Text(ar ? 'إلغاء' : 'Cancel', style: MunjiText.label),
+        ),
+        TextButton(
+          onPressed: _busy ? null : _delete,
+          child: _busy
+              ? const SizedBox(
+                  width: 18, height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2))
+              : Text(ar ? 'حذف نهائي' : 'Delete for good',
+                  style: MunjiText.label.copyWith(color: MunjiColors.red)),
+        ),
+      ],
     );
   }
 }
